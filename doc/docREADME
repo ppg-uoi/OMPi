@@ -1,0 +1,34 @@
+OMPi -- a portable OpenMP C compiler
+Copyright since 2001, University of Ioannina,
+Dept. of Computer Science & Engineering
+==================================================================
+
+
+docREADME
+=========
+
+This directory contains a number of documentation files, mostly
+targeted to developers. More documentation is available on
+OMPi's web site (http://paragroup.cs.uoi.gr/wpsite/software/ompi/).
+
+Here is a list of documents:
+
+	docREADME:  
+		This file.
+
+	ompi-implementation-specifics.html:
+		Documents behaviors of the OMPi compiler, which are
+		described as implementation-defined in the OpenMP specifications
+
+		nestedparallel.txt:
+		Information about nested parallelism support in OMPi.
+
+	runtime.txt:
+		Information about the host runtime system of OMPi.
+
+	runtime-dev.txt:
+		Information about the device runtime subsystem of OMPi.
+
+	sysdeps.txt:
+		System-dependent stuff which should be set correctly
+		so as to maximize performance

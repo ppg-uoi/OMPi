@@ -1,0 +1,127 @@
+OMPi -- a portable OpenMP C compiler
+Copyright since 2001, University of Ioannina,
+Dept. of Computer Science & Engineering
+==================================================================
+
+See files AUTHORS and NEWS for contact information.
+
+The file COPYING contains the licence. Make sure you read it first
+before using this package.
+
+The file BUGS contains a list of known bugs/limitations.
+
+This file is a (very) quick HOWTO on OMPi. It contains short
+sections on installation and usage. Consult the doc/ directory
+for more documentation.
+  
+
+============================
+                          
+ QUICK INSTALLATION GUIDE
+                          
+============================
+
+                          
+Requirements:
+You must have a standard C compiler (e.g. gcc) and libtool.
+
+
+1) Extract the package
+
+    gunzip ompi-X.Y.Z.tar.gz
+    tar xvf ompi-X.Y.Z.tar
+    
+2) Configure the package *(see below for more details)
+
+    ./configure --prefix=<install-dir>
+
+3) Compile and install the package
+
+    make
+    make install
+
+4) Make sure <install-dir>/bin is in your PATH
+
+
+For information about the configure script, see INSTALL.
+
+* (Notes on advanced configuring)
+  -------------------------------
+ 
+  If you want to enable debugging, give the --enable-debug option
+  to ./configure (turned off by default)
+
+  The compiler flags used to build the compiler & the libraries are
+  just -O3. More often than not you may want to use different ones
+  (such as e.g. -g). In such cases use 
+       ./configure CFLAGS=<your_flags> CPPFLAGS=<preprocessor_flags> ...
+
+  The default compiler is determined by configure itself (and is usually
+  gcc). If you want to use a different compiler (e.g. Intel's icc), use 
+       ./configure CC=icc ...
+
+  The compiler & flags that OMPi will later use for compiling
+  your programs are by default the ones used in ./configure time. If
+  you want different ones, define OMPI_CC, OMPI_CPP, OMPI_CFLAGS and 
+  OMPI_CPPFLAGS environmental variables, before running ompicc, 
+  as described below.
+
+  OMPi comes with multiple thread libraries, and can support even more 
+  (see doc/runtime.txt); "pthreads", based on POSIX threads, is the 
+  default one. You can choose which one OMPi will be built with as 
+  follows:
+       ./configure --with-ortlib=<name> ...
+  where <name> is one of the four, or any other library you have developed.
+  
+  OMPi can support multiple OpenMP4 devices through device 'modules'; 
+  by default, at configuration time it checks and builds all device modules 
+  that may be supported. You can choose which ones OMPi should be built with 
+  as follows:
+       ./configure --with-modules="<name> <name> ..." ...
+  i.e. space-seperated module names, where each <name> is any of the
+  modules OMPi ships with, or any other module you may have developed.
+  
+
+
+===============
+              
+ USING OMPi
+              
+===============
+
+
+Usage:  ompicc [-k] [-v] [other arguments] <cc-flags> files.c
+
+For example:
+    ompicc -o binary file1.c file2.c 
+
+arguments:
+    all (g)cc flags
+    -k : the generated (transformed) file is kept after compilation
+    -v : be verbose (shows all steps of the translation process)
+some other arguments:
+    --ort=<libname> : use an alternative runtime library (see below)
+    --devs=<devices>: target the given devices
+    --devinfo: show information about configured devices.
+    
+OMPi is a source-to-source compiler, so after generating the 
+multithreaded C program, it runs the system compiler -- which by 
+default is the one used during OMPi's installation. If you want 
+to play with different system compilers, and different 
+compilation flags, you can set three environmental variables 
+to whatever you like: 
+
+   OMPI_CPP, OMPI_CC, OMPI_CPPFLAGS, OMPI_CFLAGS and OMPI_LDFLAGS
+
+The first two specify the system preprocessor and compiler you like 
+to use and the last three ones the particular flags you want. 
+Make sure you set their values *before* running ompicc.
+
+The --ort options lets you select any runtime library you
+might have built. For more information on this topic, please refer
+to the doc/runtime.txt file.
+
+Finally, based on OpenMP 4.0 OMPi supprts attached devices that
+can execute offloaded code. Automatically configured devices are
+shown with the --devinfo flag.
+

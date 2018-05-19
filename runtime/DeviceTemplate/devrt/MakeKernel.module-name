@@ -1,0 +1,24 @@
+# MakeKernel.<modulename> is the Makefile "recipe" used to compile OpenMP 
+# kernels for the devices handled by module <modulename>.
+#
+# This Makefile is used as-is by ompicc, after first substituting any
+# @@OMPI_XXX@@ entries. Some of the available variables (see 
+# $rootdir/compiler/ompicc.c for a complete list):
+#
+# @@OMPI_MODULE@@  - the name of the module
+#	@@OMPI_LIBDIR@@  - the installation directory of OMPi libraries; 
+#                   @@OMPI_LIBDIR@@/default is the directory where the main
+#                      runtime library is stored
+#                   @@OMPI_LIBDIR@@/devices/@@OMPI_MODULE@@ is the directory
+#                      where the module is stored
+# @@OMPI_KERNELMAKEFILE@@ - the name of the makefile generated from this recipe
+# @@OMPI_OUTPUT@@  - the name of the executable file of the whole application
+# @@OMPI_CC@@      - the system compiler
+# @@OMPI_CFLAGS@@  - the compiler flags OMPi will use
+# @@OMPI_LDFLAGS@@ - the linker flags OMPi will use
+#
+# The makefile is responsible to discover all produced kernels (*_d??.c).
+
+# For exampple, discover all kernels (*_d??.c) and generate binary files
+KERNEL_SRC = $(wildcard *_d??.c)
+KERNEL_BIN = $(patsubst %.c, %.out, $(KERNEL_SRC))

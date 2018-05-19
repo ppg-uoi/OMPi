@@ -1,0 +1,17 @@
+OMPi -- a portable OpenMP C compiler
+Copyright since 2001, University of Ioannina,
+Dept. of Computer Science & Engineering
+==================================================================
+
+
+The devices runtime system of OMPi & how to experiment with it
+--------------------------------------------------------------
+                      The OMPi team
+
+
+
+--
+1. INTRODUCTION
+--
+
+Here there will be more info soon.

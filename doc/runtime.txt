@@ -1,0 +1,191 @@
+OMPi -- a portable OpenMP C compiler
+Copyright since 2001, University of Ioannina,
+Dept. of Computer Science & Engineering
+==================================================================
+
+
+The host runtime system of OMPi & how to experiment with it
+-----------------------------------------------------------
+                     The OMPi team
+
+
+
+--
+1. GENERAL RUNTIME ARCHITECTURE OF OMPi
+--
+
+Since version 2.0.0, OMPi has a new runtime organization so as to  
+support OpenMP 4 devices. It consists of two subsystems: 
+
+  (a) the host subsystem (runtime/host) and
+  (b) the device subsystem (runtime/dev_*).
+  
+What we describe here refers to the host subsystem. Documentation for
+devices can be found in the corresponding file (runtime-dev.txt).
+
+
+--
+2. WHAT OMPi SHIPS WITH
+--
+
+OMPi is distributed with a number of different host runtime libraries,
+and supports even more. By default, the "pthreads" library is 
+installed with OMPi, unless a different choice was made at 
+configuration time (see ../README file). This library is based
+on POSIX threads and provides support for nested parallelism.
+
+
+--
+3. THE HOST RUNTIME SYSTEM
+--
+
+OMPi' host runtime system resides in runtime/host/ and consists of 
+two main parts:
+
+  (a) othr.c --- which provides execution entities (EEs) and locking 
+                 functions. The EEs can be either threads or processes (in
+                 the latter case use oprc.c instead of othr.c); 
+                 we will only cover threads here.
+  (b) ort.c  --- which uses othr.c to handle all runtime services.
+
+The two parts are largely independent of each other while the
+interface between them is fixed ((b) only expects (a) to 
+provide the functions prototyped in "ee.h").
+
+This means that anybody can develop his/her own threading 
+library and use it instead of the one used in OMPi by default.
+All s/he has to do is provide a new "othr.c" in place of
+the default one and obey the "ee.h" interface (see the 
+documentation in OMPi's website on how to do this).
+
+The aforementioned libraries all use the same ort.c 
+but have different (a) parts, which lie in:
+
+  runtime/host/ee_pthreads
+  runtime/host/ee_psthr
+
+etc, correspondingly.
+
+
+--
+4. USING DIFFERENT HOST RUNTIME LIBRARIES
+--
+
+To facilitate experimenting with different threading libraries,
+while keeping the ones shipped with OMPi, OMPi uses the following
+scheme. Suppose you created a new EE library, named "foo" and you 
+want be able to use it whenever you like (you will need the auto*
+tools for this procedure):
+
+  1. Create a directory named "ee_foo" in the runtime/host/ directory
+     of OMPi's source distribution
+     
+  2. In there, put your "ee.h" file and your "othr.c" file.
+  
+  3. Provide a Makefile.am (just copy the one from e.g. ee_pthreads
+     and change the libort_a_SOURCES & EXTRA_DIST lines)
+
+  4. Create ortconf.foo (just copy the one from e.g. ee_pthreads) and
+     set the appropriate flags. These are flags you want to be used 
+     during preprocessing/compiling/linking of *user* programs when 
+     your "foo" library is utilized by ompicc. ORTINFO is just a message
+     to the user, while CPPFLAGS, CFLAGS and LDFLAGS are self-explanatory.
+     For example, the "pthreads" library that comes with OMPi 
+     (which is the default runtime library) has in "ortconf.pthreads":
+         CPPFLAGS = -D_REENTRANT
+         # No CFLAGS needed
+         LDFLAGS = -lpthread
+     
+     Once again, these flags are NOT used to build your library.
+     They are used when building user programs, linked with your 
+     library. If you want special flags in order to build your 
+     library, use the CPPFLAGS=..., CFLAGS=... parameters in 
+     ./configure (see the Installation directions in the README file).
+  
+     Consult the next section for special needs of special libraries
+     and how to provide for them in the ortconf.foo file.
+
+  5. Add a line to the AC_OUTPUT macro at the end of "configure.in":
+         runtime/host/ee_foo/Makefile
+
+  6. In the root directory of OMPi's source distribution execute:
+        ./configure --with-ortlib=foo ...
+        cd runtime      # we only make the lib, not the whole of OMPi
+        make clean      # to clean up any previous library leftovers
+        make            
+        make install
+
+From now on, OMPi's default runtime library will be based on "foo".
+Any OpenMP programs compiled by ompicc will be linked against this new 
+lib. In case you want to build a user program with any other
+library, use the --ort flag of ompicc, e.g.
+
+    ompicc --ort=psthr program.c
+
+will link the user program against the psthr library.
+
+Notice that the above procedure does NOT overwrite any other libraries
+installed. Each one of them is safely installed in a separate
+directory. It only forces OMPi to use "foo" as its default library.
+If you want to create foo but not make it the default library of OMPi,
+use the --disable-defaultlib flag when configuring:
+
+        ./configure --with-ortlib=foo --disable-defaultlib ...
+        cd runtime
+        ...
+
+
+--
+5. SPECIAL SITUATIONS
+--
+
+There are two special cases which are handled as follows:
+
+   (i) If you provide EEs based on processes, you *MUST* add
+       "-DOMPI_MEMMODEL=PROCESS" to your CFLAGS 
+       in ortconf.foo.
+
+  (ii) There are some threading libraries that need to supply
+       their own main(), overriding the one written by the user.
+       To handle this, add "-DOMPI_MAIN=LIB" to your CFLAGS 
+       in ortconf.foo.
+       In this case, OMPi will rename the user's main function
+       to "__ompi_main()". You should then call it from the
+       library's main function when fit; always call it as
+       __ompi_main(argc, argv) (OMPi makes sure it always
+       has the argc, argv arguments). 
+       See runtime/host/ee_psthr/ for an example.
+
+
+--
+6. USING PSTHR (psthreads)
+--
+
+***** IMPORTANT NOTE:
+***** Since version 1.2.3 of OMPi, version 1.0.4 of psthreads is needed.
+
+Process Scope threads (psthreads) is an open-source threading library 
+that implements a two-level thread model: non-preemptive user-level 
+threads are executed on top of kernel-level threads. It offers 
+high-performance, unlimited nested parallelism support. Psthreads 
+is a separate software package that has to be configured and 
+installed into your system. It is distributed under the GNU 
+General Public License and can be downloaded from the OMPi's 
+web site: http://paragroup.cs.uoi.gr/wpsite/software.
+
+Before using psthreads with OMPi, you have to install psthreads 
+separately in your system. Psthreads installs two scripts
+(psthreads_cflags and psthreads_libs), which should lie on your 
+$PATH.
+
+Assuming that you are currently working in the root directory 
+of OMPi's source tree, here is all that is needed:
+
+        ./configure CFLAGS="`psthreads_cflags`" --with-ortlib=psthr ...
+	cd lib
+	make clean
+        make
+        make install
+
+and use as in:  ompicc --ort=psthr program.c
+

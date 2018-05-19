@@ -1,0 +1,37 @@
+/*
+  OMPi OpenMP Compiler
+  == Copyright since 2001 the OMPi Team
+  == Dept. of Computer Science & Engineering, University of Ioannina
+
+  This file is part of OMPi.
+
+  OMPi is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2 of the License, or
+  (at your option) any later version.
+
+  OMPi is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with OMPi; if not, write to the Free Software
+  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
+#ifndef __RUNTIME_DEFS__
+#define __RUNTIME_DEFS__
+
+/*
+ * Some definitions that should be included at the top of the AST.
+ * They are taken from ort_prive.h
+ */
+
+char *rtlib_onoff =      /* Needed even if no omp pragma was found */
+"\
+int   ort_initialize(int*, char***, int, ...);\
+void  ort_finalize(int);\
+";
+
+char *rtlib_defs =       /* Only needed when transforming code */

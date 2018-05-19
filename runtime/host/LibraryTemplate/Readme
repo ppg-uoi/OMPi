@@ -1,0 +1,25 @@
+In order to create a new library named "mylib" you first need to create a
+folder named ee_mylib in runtime. Copy there the files from this directory
+and rename "ortconf.LibraryNameHere" to "ortconf.mylib"
+
+Edit ortconf.mylib according to your library.
+
+In the Makefile.am change "PUT LIBRARY NAME HERE" to "mylib", list all the
+sources for your library in "PUT LIBRARY SOURCES HERE" and the headers in
+PUT LIBRARY HEADERS HERE
+
+In configure.in that's in the top directory, scroll down to the end and
+put "runtime/ee_mylib/Makefile" in the AC_OUTPUT
+
+OPTIONAL:
+If your library needs to compiled with a different program than the one
+used for compiling ompicc put a "Makelib.conf" in your library folder
+
+If you want ompicc to create a Makefile along with the compiled program
+for example when there is a special procedure involved when you need to
+run your program, use "MakefileTemplate", and list it in "ompilib_DATA"
+that's in Makefile.am. When you compile a program, ompicc will copy that
+in the folder it was called from (unless if you call ompicc with
+"--nomakefile") and then execute targets "compile" and "link" for compi-
+ling and linking.
+

@@ -1,0 +1,42 @@
+#!/bin/sh
+#vfile="VERSION"
+
+#The first argument of the script is the file we store the version
+vfile=$1
+
+#Check if we have git and we are actually in a git repository
+if git describe > /dev/null 2>&1; then
+	#Find the branch name. If it isn't "master" use it in the version
+	branch=$(git rev-parse --abbrev-ref HEAD)
+	if [ $branch != "master" ]; then
+		echo "In master"
+		if [ $(git rev-parse --abbrev-ref HEAD | cut -c -7) != "release" ]; then
+			version=$branch-
+			echo "In branch"
+		fi
+	fi
+	
+	#Call git describe to generate a version string
+	#The string consists of:
+	# -The "closest" annotated tag
+	# -The number of commits since the tag (if there are any)
+	# -The abbreviated SHA hash of the last commit (if there have been commits since the tag)
+	version=$version$(git describe --dirty=~)
+
+	#Check if the version has changed. We don't want to touch the file otherwise
+	#If the file doesn't exist or the version it contains is different than the
+	#one we just computed overwrite it
+	if [ ! -f $vfile ] || [ $(cat $vfile) != $version ]; then
+		echo $version > $vfile
+	fi
+#If we can't use "git describe" to get a version, and the version file does not
+#exist echo a warning and write "Unknown" as version
+elif [ ! -f $vfile ]; then
+	echo Warning: No git or $vfile file found. 1>&2
+	echo "Unknown" > $vfile
+fi
+#In case we can't use "git describe" but the version file exists there is
+#nothing to do
+
+#Return the version
+#cat $vfile

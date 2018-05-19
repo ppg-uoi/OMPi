@@ -1,0 +1,43 @@
+OMPi -- a portable OpenMP C compiler
+Copyright since 2001, University of Ioannina,
+Dept. of Computer Science & Engineering
+==================================================================
+
+
+Nested parallelism in OMPi 
+--------------------------
+    The OMPi team
+
+
+OMPi's runtime system supports unlimited nested parallelism.
+This means that threads may generate child threads
+via  #pragma omp parallel  directives, to arbitrary depths
+(this is only limited by the threading library --- see below).
+
+
+The threading library
+---------------------
+
+The host runtime system (ORT) provides support for nested parallelism, 
+but what actually happens at runtime depends on the capabilities 
+of the threading ("execution entity") library in use (EELIB). 
+OMPi comes with the following EELIBs (used to support some 
+additional libraries, which are still available on request):
+
+	pthreads
+	psthr
+
+The first one is installed by default and supports nested 
+parallelism at arbitrary depths and arbitrary numbers of 
+threads. The catch is that the oversubscription of processors 
+is uncontrollable; the underlying operating system is 
+responsible for scheduling many threads onto few processors, 
+so overheads may rise. Be warned.
+
+The above problems can be alleviated by using "psthr",
+an advanced high-performance library with efficient nested 
+parallelism support. It must be obtained and installed separately; 
+psthr is available on OMPi's web page. OMPi provides a ready-to-use
+interface for this library. 
+
+More details can be found in file runtime.txt.

@@ -1,0 +1,190 @@
++---------------------------------------------------------------------------+
+| Version 2.0.0                                                             |
++---------------------------------------------------------------------------+
+This version represents a major re-organization of OMPi. 
+Some of the changes:
+
+  + First public version to support OpenMP V.4.0 (target/target data/
+    target update/declare target, cancellation and taskgroup constructs)
+  + General infrastructure for devices.
+  + Support for the Adapteva Epiphany accelerator (cf. Parallella boards).
+  + Re-designed compiler outlining
+  + Updated documentation.
+  * Completely reorganized runtime and compiler trees.
+  * Bug fixes
+  
++---------------------------------------------------------------------------+
+| Version 1.2.3                                                             |
++---------------------------------------------------------------------------+
+
+  + Final release for OpenMP V.3.x; the next release will support 
+    OpenMP V.4.0 constructs.
+  + Due to requests, the process library (ee_process) has been added
+    which utilizes heavyweight processes instead of threads and SysV-style
+    shared memory. It has a number of limitations, though (see BUGS).
+  * Various improvements especially in tasking
+  * Bug fixes
+  
++---------------------------------------------------------------------------+
+| Version 1.2.2                                                             |
++---------------------------------------------------------------------------+
+
+  + Support for most parts of OpenMP v3.1 (final, mergeable, min, max,
+    omp_in_final(), OMP_NUM_THREADS)
+  + Some new OMPi-specific extensions (see our HOMPI paper), disabled
+    by default.
+  * Improvements in tasking
+  * Experimental tasking implementation in psthr.
+  * Bug fixes
+  
++---------------------------------------------------------------------------+
+| Version 1.2.0                                                             |
++---------------------------------------------------------------------------+
+
+  - Dropped some runtime libraries from distribution tarball (pthreads1,
+    solthr, solthr1, marcel); support still provided for them on request.
+  + Full OpenMP 3.0 support (including the "collapse" clause)
+  * Improved runtime (tasks)
+  * Fully compliant threadprivate handling
+  * Bug fixes
+    
++---------------------------------------------------------------------------+
+| Version 1.1.0                                                             |
++---------------------------------------------------------------------------+
+Again, a lot of changes. Some of them:
+
+  + OpenMP 3.0 (except the "collapse" clause)
+  + Tasks
+  + Default pthreads library now offers unlimited (but not optimized)
+    nested parallelism. Psthr should be preferred for deep nesting
+    levels and/or large numbers of threads.
+  + OMPi extensions built in, but disabled by default
+
++---------------------------------------------------------------------------+
+| Version 1.0.0                                                             |
++---------------------------------------------------------------------------+
+Too many changes. Indeed, too many changes to mention.
+For the casual programmer, things should seem (almost) unchanged. 
+For the hacker, there are important changes; the doc/ directory 
+must be consulted.
+
+  + Brand new translator
+  + Full OpenMP 2.5 compatibility
+  + Full support for nested parallelism available
+  + OMPi now supports threads, processes and mixtures of processes and threads
+  - Dropped support for POMP
+  * Changed the runtime structure a bit (see doc/runtime.txt) and
+    the directory structure in lib/
+
++---------------------------------------------------------------------------+
+| Version 0.9.1f (Aug 2007)                                                 |
++---------------------------------------------------------------------------+
+All old threadprivate code removed; new & better code used now everywhere.
+  ( ort_get_thrpriv() is the one and only relevant function in ort.c )
+ort_destroy_team() abolished; code subsumed by ort_create_team(), 
+  which was renamed to ort_execute_parallel().
+
++---------------------------------------------------------------------------+
+| Version 0.9.1e (Aug 2007)                                                 |
++---------------------------------------------------------------------------+
+ort_assign_key() abolished; ort_get_thread_work() does it internally.
+  This is of great help to the parser, too.
+
++---------------------------------------------------------------------------+
+| Version 0.9.0                                                             |
++---------------------------------------------------------------------------+
+Added support for psthreads and marcel threads 
+Going public.
+
++---------------------------------------------------------------------------+
+| Version 0.8.6f2 (June 2007)                                               |
++---------------------------------------------------------------------------+
+Bug fixes in parser-generated code for CRITICAL
+Bug fix in PTHREADS and SOLTHREADS thanx to M.-C.C
+
++---------------------------------------------------------------------------+
+| Version 0.8.6 (May 2007)                                                  |
++---------------------------------------------------------------------------+
+Major release; going public.
+One of the upcoming releases will utilize a brand new parser.
+
++---------------------------------------------------------------------------+
+| Versions up to 0.8.6                                                      |
++---------------------------------------------------------------------------+
+Complete redesign of the runtime library (ORT); might well be one of the 
+fastest OpenMP runtime libraries around!
+Threading libraries now are independent; hacking should be very easy.
+ORT fully supports nested parallelism; simple and elaborate libraries included.
+Bug fixes and improvements in the parser and the produced code.
+Too many things, too fast!
+
++---------------------------------------------------------------------------+
+| Version 0.8.4 (VVD, July 2006)                                            |
++---------------------------------------------------------------------------+
+Fixed bug in parser when producing code for nested ORDEREDs. Now
+the for_info structure is stacked so as to be saved/restored.
+
+The for_data structure is NO LONGER needed (removed from the
+parser's output code AND the runtime library). It was only needed
+in nested ORDEREDs. Now, the necessary info is passed to
+the runtime library by the parser's produced code thus no
+for_data stacking is needed.
+
++---------------------------------------------------------------------------+
+| Versions up to 0.8.4                                                      |
++---------------------------------------------------------------------------+
+Too many little things.
+
++---------------------------------------------------------------------------+
+| Version 0.8.2 (17 Sep 2004)                                               |
++---------------------------------------------------------------------------+
+[+] Implemented pomp - compliant performance instrumentation.
+    To enable code instrumentation, use "ompicc --pomp-enable".
+    The supplied pomp-library is not useful (it only printf's messages),
+    so in order to actually use pomp you should download EPILOG
+    from http://www.fz-juelich.de/zam/kojak/, compile it and copy
+    libelg.a over the existing libpomp.a.
+    To graphically monitor the performance results (*.elg) you should
+    download and install CUBE from http://icl.cs.utk.edu/kojak/cube.
+[+] Gathered thread API to [othread.h, generic_othread_types.h,
+    sparc_othread_types.h, generic_othread.c, sparc_othread.c].
+    Now it is easier to support other thread packages without messing
+    with the parser.
+[+] OMPi now implements <omp.h> using either pthreads or Solaris threads.
+    To select Solaris threads use "./configure --enable-solaristhreads"
+    There is also internal (developer) support for IRIX spinlocks.
+[+] Padded lock structures to 64 bytes so that no 2 locks fit in the same
+    cache line. This also optimizes barriers.
+[+] GCC no longer implements <varargs.h>, code revised to use <stdarg.h>
+[+] Removed redundant implicit barriers (= optimization). If two #pragma omp
+    directives that require an implicit ending barrier happen to close
+    "together", only one barrier is inserted.
+[+] Changed nested locks implementation to use PTHREAD_MUTEX_RECURSIVE.
+    In Solaris threads the code still uses condition variables due to
+    a SunOS <= 5.8 bug.
+[+] Removed condition variables from the ORDERED implementation.
+    ORDERED is now implemented with simple locks, resulting in safer
+    and faster code.
+[+] omp_get_wtime now uses the best clock available to the host system
+    (Linux, Solaris, Irix)
+[+] Implemented as weak symbols the following functions:
+      void omp_barrier_init(void *bar, int n);
+      void omp_barrier_wait(void *bar);
+      void omp_barrier_destroy(void *bar);
+    Now the user can define these functions and override the built-in
+    implementation.
+[+] Added doxygen style documentation to the source code.
+[+] Added OMPi.kdevelop to work within KDevelop 3.0+.
+[+] Added SAFE_MALLOC macro for error-checked memory allocation.
+[+] Passed the _OPENMP, _POMP definitions as compiler options, so that user
+    code like
+      #ifdef _OPENMP
+      #include <omp.h>
+      #endif
+    works.
+[+] Some other bug fixes and minor optimizations
+
++---------------------------------------------------------------------------+
+| Version 0.8.1 (17 Sep 2003)                                               |
++---------------------------------------------------------------------------+
+[+] First public release

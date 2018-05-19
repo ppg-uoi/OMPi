@@ -1,0 +1,73 @@
+#
+#    OMPi OpenMP Compiler
+#    == Copyright since 2001 the OMPi Team
+#    == Dept. of Computer Science & Engineering, University of Ioannina
+#
+#    This file is part of OMPi.
+#
+#    OMPi is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    OMPi is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with OMPi; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+
+#  MODULE: epiphany
+#    PART: Makefile recipe for compiling kernels for this module devices;
+#          it should discover all produced kernels (*_d??.c);
+#          all @OMPI_XXX@ variables get substituted by ompicc at compile time.
+
+# Where OMPi installed the module files
+LIBPATH = @@OMPI_LIBDIR@@/devices/@@OMPI_MODULE@@
+
+# The name of the module
+MODULE    = @@OMPI_MODULE@@
+
+# The name of the main executable
+RUNEXE    = @@OMPI_OUTPUT@@
+
+# e-gcc compile and link flags
+eCFLAGS   = -O3 -D WRAPPER_RET_TYPE="void *" -D WRAPPER_PARAM_TYPE="void *"
+eLDFLAGS  =
+
+# Stuff
+ESDK      = $(EPIPHANY_HOME)
+ELIBS     = $(ESDK)/tools/host/lib
+EINCS     = $(ESDK)/tools/host/include
+ELDF      = ${LIBPATH}/ompi_internal.ldf
+KERNELS   = $(wildcard *_d??.c)
+SRECS     = $(patsubst %.c, %.srec, $(KERNELS))
+RUNSCRIPT = run.sh
+
+# Compile the kernel files and produce run.sh script
+all: $(SRECS)
+	@if [ `e-gcc --version | grep -c 2015 | cut -c 1` -eq 0 ]; then\
+		echo '#!/bin/bash' > $(RUNSCRIPT);\
+		echo 'set -e' >> $(RUNSCRIPT);\
+		echo 'ESDK=$${EPIPHANY_HOME}' >> $(RUNSCRIPT);\
+		echo 'ELIBS=$${ESDK}/tools/host/lib:$${LD_LIBRARY_PATH}' >> $(RUNSCRIPT);\
+		echo 'EHDF=$${EPIPHANY_HDF}' >> $(RUNSCRIPT);\
+		echo 'sudo -E LD_LIBRARY_PATH=$${ELIBS} EPIPHANY_HDF=$${EHDF} ./${RUNEXE}' >> $(RUNSCRIPT);\
+		chmod +x $(RUNSCRIPT);\
+		echo "[OMPi info] to execute the program do ./run.sh";\
+	fi
+
+%.elf: %.c
+	@e-gcc $(eCFLAGS) -funroll-loops -ffast-math -T $(ELDF) -L${LIBPATH} $< -o $@ -ldevrt -le-lib $(eLDFLAGS)
+
+%.srec: %.elf
+	@e-objcopy --srec-forceS3 --output-target srec $< $(patsubst %.srec, %, $@)-${MODULE}.srec
+	@rm -f $<
+
+# Force make to keep intemediate .elf files, so that we can remove them
+# explicitly silently.
+.PRECIOUS: %.elf
+

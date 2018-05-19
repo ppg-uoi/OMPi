@@ -1,0 +1,59 @@
+OMPi -- a portable OpenMP C compiler
+Copyright since 2001, University of Ioannina,
+Dept. of Computer Science & Engineering
+==================================================================
+
+
+System-dependent stuff in OMPi
+------------------------------
+    VVD & the OMPi team
+
+
+
+OMPi has been designed so as to run in almost every
+POSIX-compliant system around; it actually has been succesfully
+installed in numerous systems that support POSIX threads
+with no effort whatsoever.
+
+However, it has been heavily tested and optimized for three
+particular platforms (x86/linux, SPARC/solaris, MIPS/Irix).
+For such systems, there are particular characteristics
+that are taken into account to optimize a couple of operations.
+
+The system-specific stuff are defined in files "lib/sysdeps.h"
+and "lib/sysdeps.c". For any system other than the aforementioned
+ones, it is worth modifying sysdeps as explained below,
+in order to boost performance.
+
+
+SYSDEPS.H
+---------
+There are 2 things that OMPi needs:
+
+  (1) A "CACHE_LINE" size to perform aligned memory allocations
+  (2) A macro "FENCE" which provides a memory barrier
+
+and both of them are cpu-specific, and defined in sysdeps.h.
+
+The CACHE_LINE size for x86, SPARC and MIPS cpus are
+included in sysdeps.h, but for all others CACHE_LINE is set to 
+128 bytes which should work ok for most architectures.
+Define CACHE_LINE to the correct size for your cpu for optimal
+performance.
+
+The FENCE macro serializes memory operations (it provides a
+memory barrier). For the 3 aforementioned platoforms, special
+assembly instructions are used to implement it; for all others
+a very bad solution has been employed (works, but it is slow):
+    lock & unlock a pthread mutex,
+which, according to the pthreads specifications, does the job.
+Try to #define a better FENCE for your architecture as it
+makes quite a performance difference.
+
+
+SYSDEPS.C
+---------
+The only thing that is system specific is the sysconf() call
+to obtain the number of available processors; try to find
+the particular parameter (man sysconf) for your special system,
+or OMPi will assume you have 1 cpu only.

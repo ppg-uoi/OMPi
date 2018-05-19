@@ -1,0 +1,16 @@
+Known OMPi bugs/limitations
+===========================
+
+=> OpenMP V4.0 support: device constructs (target-related ones),
+   cancellation constructs, taskgroup; runtime routines and environmental
+   variables.
+=> Most of OpenMP V3.1 is supported, except the new atomic
+   construct; full support in the next version of OMPi.
+=> Full C99 support except for variable-size arrays (they are
+   only supported outside parallel regions). Of course, C99
+   programs should also be supported by the system compiler.
+=> For the moment, the parser cannot properly handle a variable 
+   name if there exists a user-defined type with the same name.
+=> The following do not work with the included process library (ee_process):
+	 i) threadprivate variables ii) extern variables iii) tasks and 
+	 iv) nested locks

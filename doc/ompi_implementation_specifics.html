@@ -1,0 +1,282 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"  
+  "http://www.w3.org/TR/html4/loose.dtd">  
+<html > 
+<head><title>OpenMP Implementation-Defined Behaviors
+for
+OMPi v2.0.0</title> 
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"> 
+<meta name="generator" content="TeX4ht (http://www.cse.ohio-state.edu/~gurari/TeX4ht/)"> 
+<meta name="originator" content="TeX4ht (http://www.cse.ohio-state.edu/~gurari/TeX4ht/)"> 
+<!-- html,fn-in,uni-html4 --> 
+<meta name="src" content="ompi_implementation_specifics.tex"> 
+<meta name="date" content="2016-03-23 16:36:00"> 
+<link rel="stylesheet" type="text/css" href="ompi_implementation_specifics.css"> 
+</head><body 
+>
+   <div class="maketitle">
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+
+<h2 class="titleHead">OpenMP Implementation-Defined Behaviors<br />
+for<br />
+OMPi v2.0.0</h2>
+ <div class="author" ></div><br />
+<div class="date" ></div>
+   </div>
+     <div class="quote">
+     <!--l. 33--><p class="noindent" ><span 
+class="cmti-10">This  document  enlists  behaviors  of  the  </span><span 
+class="cmcsc-10">OMP</span><span 
+class="cmti-10">i</span><span 
+class="cmti-10">&#x00A0;compiler,  which  are  described  as</span>
+     <span 
+class="cmti-10">implementation-defined in the OpenMP specifications. </span></div>
+   <h3 class="sectionHead"><span class="titlemark">1   </span> <a 
+ id="x1-10001"></a>Internal Control Variables (ICVs)</h3>
+<!--l. 43--><p class="noindent" >Specific ICVs and their initial values are given in the table below. Please notice that <span 
+class="cmcsc-10">OMP</span>i&#x00A0;can utilize
+multiple and different threading libraries, each of which may have its own initial / default values for some
+of these ICVs; library-specific ICVs are marked by an asterisk (*). Values in the table below refer to the
+default threading library (pthreads).
+<div class="center" 
+>
+<!--l. 53--><p class="noindent" >
+<div class="tabular"> <table id="TBL-2" class="tabular" 
+cellspacing="0" cellpadding="0" rules="groups" 
+><colgroup id="TBL-2-1g"><col 
+id="TBL-2-1"></colgroup><colgroup id="TBL-2-2g"><col 
+id="TBL-2-2"></colgroup><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-1-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-1-1"  
+class="td11"> <!--l. 56--><p class="noindent" >ICV name                        </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-1-2"  
+class="td11"> <!--l. 56--><p class="noindent" >Initial value                         </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-2-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-2-1"  
+class="td11"> <!--l. 57--><p class="noindent" ><span 
+class="cmti-10">nthreads-var</span>                     </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-2-2"  
+class="td11"> <!--l. 57--><p class="noindent" ># available cores (*)              </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-3-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-3-1"  
+class="td11"> <!--l. 58--><p class="noindent" ><span 
+class="cmti-10">dyn-var</span>                           </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-3-2"  
+class="td11"> <!--l. 58--><p class="noindent" ><span 
+class="cmtt-10">true </span>(*)                              </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-4-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-4-1"  
+class="td11"> <!--l. 59--><p class="noindent" ><span 
+class="cmti-10">run-sched-var</span>                   </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-4-2"  
+class="td11"> <!--l. 59--><p class="noindent" ><span 
+class="cmtt-10">static</span>                    </td></tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-5-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-5-1"  
+class="td11"> <!--l. 60--><p class="noindent" ><span 
+class="cmti-10">def-sched-var</span> </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-5-2"  
+class="td11"> <!--l. 60--><p class="noindent" ><span 
+class="cmtt-10">static</span></td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-6-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-6-1"  
+class="td11"> <!--l. 61--><p class="noindent" ><span 
+class="cmti-10">bind-var</span>                          </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-6-2"  
+class="td11"> <!--l. 61--><p class="noindent" ><span 
+class="cmtt-10">true </span>(*)                              </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-7-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-7-1"  
+class="td11"> <!--l. 62--><p class="noindent" ><span 
+class="cmti-10">stacksize-var</span>                     </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-7-2"  
+class="td11"> <!--l. 62--><p class="noindent" >OS default value (*)              </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-8-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-8-1"  
+class="td11"> <!--l. 63--><p class="noindent" ><span 
+class="cmti-10">wait-policy-var</span>                  </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-8-2"  
+class="td11"> <!--l. 63--><p class="noindent" ><span 
+class="cmtt-10">active </span>(*)                           </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-9-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-9-1"  
+class="td11"> <!--l. 64--><p class="noindent" ><span 
+class="cmti-10">thread-limit-var</span>                 </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-9-2"  
+class="td11"> <!--l. 64--><p class="noindent" >no limit (*)                          </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-10-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-10-1"  
+class="td11"> <!--l. 65--><p class="noindent" ><span 
+class="cmti-10">max-active-levels-var</span>           </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-10-2"  
+class="td11"> <!--l. 65--><p class="noindent" >no limit (*)                          </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-11-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-11-1"  
+class="td11"> <!--l. 66--><p class="noindent" ><span 
+class="cmti-10">place-partition-var</span>              </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-11-2"  
+class="td11"> <!--l. 66--><p class="noindent" ><span 
+class="cmtt-10">threads</span>                   </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-12-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-12-1"  
+class="td11"> <!--l. 67--><p class="noindent" ><span 
+class="cmti-10">default-device-var</span>               </td><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-12-2"  
+class="td11"> <!--l. 67--><p class="noindent" >1 if at least 1 device attached,
+ <!--l. 68--><p class="noindent" >0 (host) if none attached        </td>
+</tr><tr 
+class="hline"><td><hr></td><td><hr></td></tr><tr  
+ style="vertical-align:baseline;" id="TBL-2-13-"><td  style="white-space:nowrap; text-align:left; vertical-align:middle;" id="TBL-2-13-1"  
+class="td11">                         </td></tr></table></div><br />
+(*) threading-library specific.</div>
+                                                                                  
+                                                                                  
+<!--l. 73--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">2   </span> <a 
+ id="x1-20002"></a>Dynamic Adjustment of Threads</h3>
+<!--l. 75--><p class="noindent" >When the dynamic adjustment of threads is disabled and the threading library cannot provide the
+requested number of threads, the application is aborted with an advice to enable dynamic adjustment
+either programmatically or using the corresponding environmental variable.
+<!--l. 80--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">3   </span> <a 
+ id="x1-30003"></a>Loop Directive</h3>
+     <ul class="itemize1">
+     <li class="itemize">If the runtime schedule has been selected and the <span 
+class="cmti-10">run-sched-var </span>ICV is set to <span 
+class="cmtt-10">auto</span>, then the
+     iterations are distributed using a <span 
+class="cmtt-10">static </span>schedule.
+     </li>
+     <li class="itemize">For a collapsed loop, the variable used to compute the iteration count is of type <span 
+class="cmtt-10">int</span>.</li></ul>
+<!--l. 90--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">4   </span> <a 
+ id="x1-40004"></a>Sections Construct</h3>
+<!--l. 92--><p class="noindent" >Scheduling of the structured <span 
+class="cmtt-10">section </span>blocks among threads is competitive; threads are assigned <span 
+class="cmtt-10">section</span>
+blocks on a first-come first-serve basis.
+<!--l. 96--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">5   </span> <a 
+ id="x1-50005"></a>Single Construct</h3>
+<!--l. 98--><p class="noindent" >The selection of a thread to execute a structured <span 
+class="cmtt-10">single </span>block is competitive; the first thread to ask for it,
+gets to execute it.
+<!--l. 113--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">6   </span> <a 
+ id="x1-60006"></a>Processor</h3>
+<!--l. 115--><p class="noindent" >A &#8216;processor&#8217; is whatever the OS system calls report.
+<!--l. 118--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">7   </span> <a 
+ id="x1-70007"></a>Device</h3>
+<!--l. 120--><p class="noindent" >Devices are the host and any additional attached compute units. In this version, <span 
+class="cmcsc-10">OMP</span>i&#x00A0;can support the
+Adapteva Epiphany accelerator as a device.
+<!--l. 125--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">8   </span> <a 
+ id="x1-80008"></a>Runtime Routines</h3>
+     <ul class="itemize1">
+     <li class="itemize"><span 
+class="cmti-10">omp</span><span 
+class="cmti-10">_set</span><span 
+class="cmti-10">_num</span><span 
+class="cmti-10">_threads() </span>: if the argument is not a positive integer, then it is assumed to be
+     equal to 1.
+                                                                                  
+                                                                                  
+     </li>
+     <li class="itemize"><span 
+class="cmti-10">omp</span><span 
+class="cmti-10">_set</span><span 
+class="cmti-10">_schedule() </span>: there are no additional loop schedules defined.
+     </li>
+     <li class="itemize"><span 
+class="cmti-10">omp</span><span 
+class="cmti-10">_set</span><span 
+class="cmti-10">_max</span><span 
+class="cmti-10">_active</span><span 
+class="cmti-10">_levels() </span>: if the argument is not a positive integer, then the routine simply
+     returns. If it is called from within a explicit parallel regiion, the binding thread set is all
+     threads.
+     </li>
+     <li class="itemize"><span 
+class="cmti-10">omp</span><span 
+class="cmti-10">_get</span><span 
+class="cmti-10">_max</span><span 
+class="cmti-10">_active</span><span 
+class="cmti-10">_levels() </span>: if it is called from within a explicit parallel regiion, the binding
+     thread set is all threads.</li></ul>
+<!--l. 141--><p class="noindent" >
+   <h3 class="sectionHead"><span class="titlemark">9   </span> <a 
+ id="x1-90009"></a>Environmental Variables</h3>
+     <ul class="itemize1">
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_SCHEDULE</span></span></span> : if the value of the variable does not conform to the specified format, it is
+     considered to be equal to <span 
+class="cmtt-10">auto</span>.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_NUM_THREADS</span></span></span> : if any list value is not a positive integer, the default number of threads
+     is used (which is threading-library specific; see the table above). It the requested number of
+     threads exceeds the capabilities of the threading library (which cannot happen when using
+     the default threading library) the program is aborted with an informative message.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_PROC_BIND</span></span></span> : if the value of the variable is not <span 
+class="cmtt-10">true</span>, <span 
+class="cmtt-10">false </span>or a comma-seperated list of
+     <span 
+class="cmtt-10">master</span>, <span 
+class="cmtt-10">close </span>or <span 
+class="cmtt-10">spread</span>, then it is considered to be <span 
+class="cmtt-10">true</span>.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_PLACES</span></span></span> : the only abstract names recognized are <span 
+class="cmtt-10">threads</span>, <span 
+class="cmtt-10">cores </span>and <span 
+class="cmtt-10">sockets</span>. If creating
+     a place by appending the number <span 
+class="cmmi-10">n </span>to an abstract name, then a) if <span 
+class="cmmi-10">n </span>is greater than the
+     available  resourses,  the  default  places  are  used  and  b)  if  <span 
+class="cmmi-10">n </span>is  smaller  than  the  available
+     resources, the first <span 
+class="cmmi-10">n </span>resources are used.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_DYNAMIC,</span><span 
+class="cmtt-10">&#x00A0;OMP_NESTED</span></span></span> : if the value of the variable is neither <span 
+class="cmtt-10">true </span>nor <span 
+class="cmtt-10">false</span>, then it is
+     considered to be <span 
+class="cmtt-10">false</span>.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_STACKSIZE</span></span></span> : if the value of the variable does not conform to the specified format, it is
+     considered to be equal to 256KB.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_WAIT_POLICY</span></span></span> : if the value of the variable is neither active nor passive, it is ignored. The
+     details of the wait policy behavior are threading-library specific. For the default threading
+     library,  the  wait  policy  is  always  active  irrespectively  of  the  value  of  this  environmental
+     variable.
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_MAX_ACTIVE_LEVELS</span></span></span> : if the value is not a positive integer, it is ignored. The default
+     behavior,  for  the  case  where  the  requested  number  of  levels  is  larger  than  what  can  be
+     supported, is threading-library specific (does not concern the default threading library).
+                                                                                  
+                                                                                  
+     </li>
+     <li class="itemize"><span class="obeylines-h"><span class="verb"><span 
+class="cmtt-10">OMP_THREAD_LIMIT</span></span></span> : if the value is not a positive integer, it is ignored. The default behavior,
+     for the case where the requested number of threads is larger than what can be supported, is
+     threading-library specific (does not concern the default threading library).</li></ul>
+    
+</body></html> 
+
+                                                                                  
+
+
