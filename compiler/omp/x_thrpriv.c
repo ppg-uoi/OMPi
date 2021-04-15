@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_thrpriv.c */
@@ -34,6 +34,7 @@
 #include "x_clauses.h"
 #include "symtab.h"
 #include "ompi.h"
+#include "builder.h"
 
 
 static int  tpngnum = -1;
@@ -96,7 +97,7 @@ aststmt tp_ng_new(symbol var)
 	/* Add a global key; we add a numeric id since there may exist multiple
 	 * non-global threadprivate vars with the same name
 	 */
-	newglobalvar(Declaration(Speclist_right(
+	bld_globalvar_add(Declaration(Speclist_right(
 	                           StClassSpec(SPEC_static),
 	                           Declspec(SPEC_void)
 	                         ),
@@ -106,7 +107,7 @@ aststmt tp_ng_new(symbol var)
 	                         )));
 	/* Change the name in the original declaration (not the symbol table) */
 	s = tp_new_name(var);
-	xc_decl_rename(decl, s);
+	decl_rename(decl, s);
 
 	/* Create a new declaration locally */
 	return (tp_declaration(e, var, Identifier(s), false));
@@ -140,7 +141,7 @@ aststmt tp_g(symbol var)
 	 *   "unknown identifier"s). BUT, if one duplicates the declaration,
 	 *   the new name will be included.
 	 */
-	xc_decl_rename(e->decl, tp_new_name(var));
+	decl_rename(e->decl, tp_new_name(var));
 
 	return (new);
 }
@@ -219,15 +220,12 @@ void tp_fix_funcbody_gtpvars(aststmt t)
 		st = Declaration(
 		       ast_spec_copy_nosc(v->spec),
 		       InitDecl(
-		         xc_decl_topointer(
-		           xc_decl_rename(ast_decl_copy(v->decl), e->key)),
+		         decl_topointer(decl_rename(ast_decl_copy(v->decl), e->key)),
 		         FunctionCall(
 		           IdentName("ort_get_thrpriv"),
-		           CommaList(
-		             CommaList(
-		               UOAddress(IdentName(_tpkey)),
-		               Sizeof(Identifier(s))
-		             ),
+		           Comma3(
+		             UOAddress(IdentName(_tpkey)),
+		             Sizeof(Identifier(s)),
 		             UOAddress(Identifier(s))
 		           )
 		         )
@@ -250,15 +248,19 @@ void tp_fix_funcbody_gtpvars(aststmt t)
 }
 
 
-/* Declares and initializes a pointer to a threadprivate var.
- * e       is the original tp var
- * newvar  is the name of the new pointer var
- * base    is where we intialize from (normally, Identifier(e->key))
- * baseisptr is a flag to denote that base is a pointer or not
- *         in the non-pointer case we get:
- *             newvar = ort_get_thrpriv(<original_key>, sizeof(base), &base)
- *         else:
- *             newvar = ort_get_thrpriv(<original_key>, sizeof(*base), base)
+/**
+ * Declares and initializes a pointer to a threadprivate var.
+ * 
+ * @param e       the original tp var
+ * @param newvar  the name of the new pointer var
+ * @param base    where we intialize from (normally, Identifier(e->key))
+ * @param baseisptr is a flag to denote that base is a pointer or not
+ *                in the non-pointer case we get:
+ *                   newvar = ort_get_thrpriv(<orig_key>, sizeof(base), &base)
+ *                else:
+ *                   newvar = ort_get_thrpriv(<orig_key>, sizeof(*base), base)
+ * 
+ * @return A declaration statement.
  */
 aststmt tp_declaration(stentry e, symbol newvar, astexpr base, bool baseisptr)
 {
@@ -266,19 +268,14 @@ aststmt tp_declaration(stentry e, symbol newvar, astexpr base, bool baseisptr)
 	  Declaration(
 	    ast_spec_copy_nosc(e->spec),
 	    InitDecl(
-	      xc_decl_topointer(xc_decl_rename(ast_decl_copy(e->decl), newvar)),
+	      decl_topointer(decl_rename(ast_decl_copy(e->decl), newvar)),
 	      FunctionCall(
 	        IdentName("ort_get_thrpriv"),
-	        CommaList(
-	          CommaList(
-	            UOAddress(Identifier(tp_key_name(e))),
-	            Sizeof(baseisptr ?
-	                   UnaryOperator(UOP_star, Parenthesis(base)) :
-	                   base)
-	          ),
+	        Comma3(
+	          UOAddress(Identifier(tp_key_name(e))),
+	          Sizeof(baseisptr ? Deref(Parenthesis(base)) : base),
 	          /* **MUST** copy the "base", not use it for a 2nd time! */
-	          baseisptr ? ast_expr_copy(base) :
-	          UOAddress(ast_expr_copy(base))
+	          baseisptr ? ast_expr_copy(base) : UOAddress(ast_expr_copy(base))
 	        )
 	      )
 	    )

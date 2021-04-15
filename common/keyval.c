@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* keyval.c -- A simple reader for key-value files */
@@ -28,8 +28,8 @@
  * Any lines starting with # are considered comments and are ignored.
  * Any other (wrong) lines are ignored.
  *
- * Use it by calling keyval_read(fp, act).
- * For each correct line found, it calls act(keyword, string).
+ * Use it by calling keyval_read(fp, act, extrarg).
+ * For each correct line found, it calls act(keyword, string, extrarg).
  */
 
 #include <stdio.h>
@@ -143,7 +143,7 @@ static void sc_get_rest_of_line(int n, char *buf)
  */
 
 
-void keyval_read(FILE *fp, void (*act)(char *key, char *value))
+void keyval_read(FILE *fp, kv_action_t act, void *userarg)
 {
 	char key[KV_KEYLEN], value[KV_VALUELEN];
 
@@ -161,6 +161,6 @@ void keyval_read(FILE *fp, void (*act)(char *key, char *value))
 
 		sc_skip_spaces();
 		sc_get_rest_of_line(KV_VALUELEN, value);
-		act(key, value);
+		act(key, value, userarg);
 	}
 }

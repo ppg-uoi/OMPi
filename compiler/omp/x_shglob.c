@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_shglob.c -- takes care of globals in the process model */
@@ -25,16 +25,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
-#include <time.h>
 #include "ast_xform.h"
-#include "ast_free.h"
 #include "ast_copy.h"
-#include "x_thrpriv.h"
 #include "x_types.h"
 #include "x_clauses.h"
 #include "symtab.h"
 #include "ompi.h"
+#include "builder.h"
 
 
 /* This is used only in the cases where a global var has an initializer */
@@ -48,7 +45,7 @@ void new_insertdummyinitvar(stentry orig)
 
 	sprintf(dininame(), "_sglini_%s", orig->key->name);
 	e = symtab_insert_global(stab, Symbol(dininame()), IDNAME);  /* Declare it */
-	e->decl       = xc_decl_rename(orig->decl, Symbol(dininame()));
+	e->decl       = decl_rename(orig->decl, Symbol(dininame()));
 	e->spec       = orig->spec;
 	e->idecl      = orig->idecl;
 	e->isarray    = orig->isarray;
@@ -70,7 +67,7 @@ void new_insertdummyinitvar(stentry orig)
 void sgl_fix_sglvars()
 {
 	stentry e;
-	aststmt st, l = NULL;
+	aststmt st;
 	astexpr initer;
 	struct timeval ts;
 	char    funcname[32];
@@ -111,46 +108,24 @@ void sgl_fix_sglvars()
 		 */
 		st = FuncCallStmt(
 		       IdentName("ort_sglvar_allocate"),
-		       CommaList(
-		         CommaList(
-		           CastedExpr(
-		             Casttypename(
-		               Declspec(SPEC_void),
-		               AbstractDeclarator(
-		                 Pointer(),
-		                 AbstractDeclarator(Pointer(), NULL)
-		               )
-		             ),
-		             UOAddress(Identifier(e->key))
+		       Comma3(
+		         CastedExpr(
+		           Casttypename(
+		             Declspec(SPEC_void),
+		             AbstractDeclarator(
+		               Pointer(),
+		               AbstractDeclarator(Pointer(), NULL)
+		             )
 		           ),
-		           Sizeoftype(Casttypename(ast_spec_copy_nosc(e->spec),
-		                                   xt_concrete_to_abstract_declarator(e->decl)))
+		           UOAddress(Identifier(e->key))
 		         ),
+		         Sizeoftype(
+		           Casttypename(ast_spec_copy_nosc(e->spec),
+		                        xt_concrete_to_abstract_declarator(e->decl))),
 		         CastVoidStar(initer ? initer : numConstant(0))
 		       )
 		     );
-		l = l ? BlockList(l, st) : st;
-		xc_decl_topointer(e->decl);           /* change to pointer */
+		bld_autoinits_add(st);                /* Add to auto inits */
+		decl_topointer(e->decl);           /* change to pointer */
 	}
-
-	/* A unique name for the constructor */
-	gettimeofday(&ts, NULL);
-	sprintf(funcname, "_shvars_%X%X_", (unsigned) ts.tv_sec, (unsigned) ts.tv_usec);
-
-	l = FuncDef(Speclist_right(StClassSpec(SPEC_static), Declspec(SPEC_void)),
-	            Declarator(
-	              NULL,
-	              FuncDecl(
-	                IdentifierDecl(Symbol(funcname)),
-	                ParamDecl(Declspec(SPEC_void), NULL)
-	              )
-	            ),
-	            NULL, Compound(l));
-	tail_add(verbit("#ifdef __SUNPRO_C\n"
-	                "  #pragma init(%s)\n"
-	                "#else \n"  /* gcc assumed */
-	                "  static void __attribute__ ((constructor)) "
-	                "%s(void);\n"
-	                "#endif\n", funcname, funcname));
-	tail_add(l);
 }

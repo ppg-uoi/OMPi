@@ -17,12 +17,14 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ox_xform.c */
 
 /*
+ * 2019/03/06:
+ *   small code refactoring
  * 2012/03/08:
  *   new dynamic outsize support
  * 2010/02/28:
@@ -44,7 +46,7 @@
 #include <string.h>
 #include <assert.h>
 #include "ast.h"
-#include "boolean.h"
+#include "stddefs.h"
 #include "symtab.h"
 #include "parser.h"
 #include "ompi.h"
@@ -67,7 +69,7 @@
 #define OX_TYPE_FLOAT     16
 #define OX_TYPE_DOUBLE    24
 
-/* from the lwrte library */
+/* from the torc library */
 #define CALL_BY_VAL  "0"   /* IN   - By value (not used any more actually) */
 #define CALL_BY_PTR  "1"   /* IN   - By value, from address */
 #define CALL_BY_REF  "2"   /* INOUT- By reference */
@@ -83,6 +85,7 @@
 #define SIZE_CLAUSEXPR 3  /* size given in a TASKDEF clause expression */
 #define SIZE_DYNAMIC   4  /* size of out() array is dynamic */
 
+#define TASKFUNC_TAIL "_torctask"
 #define CALLBACK_TAIL "_callback"
 
 /* Info about the arguments of a task function */
@@ -129,6 +132,14 @@ static symbol infarg(symbol s)
 {
 	sprintf(infarg_str, "_ompix_%s", s->name);
 	return (Symbol(infarg_str));
+}
+/* Name of the task function */
+static symbol torctask_func(symbol fid)
+{
+	static char ttfn[256];
+	strncpy(ttfn, fid->name, 255 - strlen(TASKFUNC_TAIL));
+	strcat(ttfn, TASKFUNC_TAIL);
+	return (Symbol(ttfn));
 }
 /* Name of the callback function */
 static symbol callback_func(symbol fid)
@@ -300,16 +311,13 @@ taskfunc Taskfunction(oxcon c)
 			astdecl new = ast_decl_copy(p->decl);
 			aststmt l;
 
-			xc_decl_rename(p->decl, infarg(p->pid));
-			xc_decl_topointer(p->decl);
+			decl_rename(p->decl, infarg(p->pid));
+			decl_topointer(p->decl);
 			p->decl = new;                 /* so as to later clone the original one */
 			l = Declaration(ast_spec_copy_nosc(new->spec),
 			                InitDecl(
 			                  ast_decl_copy(new->decl),
-			                  UnaryOperator(
-			                    UOP_star,
-			                    Identifier(infarg(p->pid))
-			                  )
+			                  Deref( Identifier(infarg(p->pid)) )
 			                )
 			               );
 			if (c->body->body->body != NULL)
@@ -362,7 +370,7 @@ aststmt Callbackfunction(oxcon c, taskfunc tf)
 	ast_stmt_free(cbf->body);       /* Free the body */
 	cbf->body = c->callback;        /* The callback body */
 	fid = decl_getidentifier(cbf->u.declaration.decl);
-	fid->u.id = callback_func(fid->u.id);  /* ... but with new name */
+	fid->u.id = callback_func(tf->tfid);  /* ... but with new name */
 
 	/* Take care of the scalar IN arguments as in Taskfunction() */
 	for (i = 0; i < tf->np; i++)
@@ -372,10 +380,7 @@ aststmt Callbackfunction(oxcon c, taskfunc tf)
 			    Declaration(ast_spec_copy_nosc(p->decl->spec),
 			                InitDecl(
 			                  ast_decl_copy(p->decl->decl),
-			                  UnaryOperator(
-			                    UOP_star,
-			                    Identifier(p->pid)
-			                  )
+			                  Deref( Identifier(p->pid) )
 			                )
 			               ),
 			    cbf->body->body
@@ -386,6 +391,19 @@ aststmt Callbackfunction(oxcon c, taskfunc tf)
 }
 
 
+/**
+ * Just replaces the function name using the predfined TASKFUNC_TAIL
+ */
+static
+aststmt rename_taskfunc(aststmt func)
+{
+	astdecl decl = func->u.declaration.decl;
+	symbol newfid = torctask_func(decl_getidentifier_symbol(decl));
+	decl_rename(decl, newfid);
+	return (func);
+}
+
+
 static
 void ox_xform_taskdef(aststmt *t)
 {
@@ -393,23 +411,33 @@ void ox_xform_taskdef(aststmt *t)
 	 * parameter sizes, but NOT their type. We'll do that later,
 	 * after the function transformation.
 	 */
+	aststmt  origfunc = ast_stmt_copy((*t)->u.ox->body);
 	taskfunc tf = Taskfunction((*t)->u.ox);
 	aststmt  new, cbf;
 
-	oxcon_xform(&((*t)->u.ox));
+	ast_parentize(origfunc);           /* A copy, so parentize correctly */
+	ast_stmt_xform(&origfunc);         /* Transform it */
+	
+	rename_taskfunc((*t)->u.ox->body); /* Add the suffix to the taskfunc */
+	oxcon_xform(&((*t)->u.ox));        /* Transform the task version */
 	types_function_params((*t)->u.ox->body->u.declaration.decl, tf->p);
 
 	if (tf->has_callback)
 	{
 		cbf = Callbackfunction((*t)->u.ox, tf);
-		new = BlockList(oxdir_commented((*t)->u.ox->directive),
-		                BlockList((*t)->u.ox->body, cbf));
-		cbf->parent = new;
 		ast_stmt_xform(&cbf);
+		new = Block6(xform_clone_funcdecl(torctask_func(tf->tfid)),
+		             xform_clone_funcdecl(callback_func(tf->tfid)),
+		             origfunc, 
+		             oxdir_commented((*t)->u.ox->directive), 
+		             (*t)->u.ox->body, 
+		             cbf);
 	}
 	else
-		new = BlockList(oxdir_commented((*t)->u.ox->directive),
-		                (*t)->u.ox->body);
+		new = Block4(xform_clone_funcdecl(torctask_func(tf->tfid)),
+		             origfunc, 
+		             oxdir_commented((*t)->u.ox->directive), 
+		             (*t)->u.ox->body);
 	(*t)->parent = new;
 	new->parent = (*t)->parent;
 	free(*t);
@@ -445,20 +473,15 @@ void ox_xform_taskschedule(aststmt *t)
 
 	f =  FuncCallStmt(
 	       IdentName("torc_taskschedule"),
-	       CommaList(
-	         CommaList(
-	           CommaList(
-	             numConstant(scopetype == OX_SCOPE_NODES ? 0 :
-	                         scopetype == OX_SCOPE_WLOCAL ? 1 :
-	                         scopetype == OX_SCOPE_WGLOBAL ? 2 :
-	                         -1),                                 /* 1 */
-	             (start) ? ast_expr_copy(start->u.expr) :
-	             numConstant(-1)                        /* 2 */
-	           ),
-	           (stride) ? ast_expr_copy(stride->u.expr) :
-	           Constant(strdup("(1<<31)-1"))           /* 3 */
-	         ),
-	         numConstant(tied == -1 ? -1 : (tied == 0 ? 0 : 1))   /* 4 */
+	       Comma4(
+	         numConstant(scopetype == OX_SCOPE_NODES ? 0 :
+	                     scopetype == OX_SCOPE_WLOCAL ? 1 :
+	                     scopetype == OX_SCOPE_WGLOBAL ? 2 :
+	                     -1),                                             /* 1 */
+	         ((start) ? ast_expr_copy(start->u.expr) : numConstant(-1)),  /* 2 */
+	         ((stride) ? ast_expr_copy(stride->u.expr) :
+	                     Constant(strdup("(1<<31)-1"))),                  /* 3 */
+	         numConstant(tied == -1 ? -1 : (tied == 0 ? 0 : 1))           /* 4 */
 	       )
 	     );
 	v = oxdir_commented((*t)->u.ox->directive);
@@ -595,7 +618,6 @@ symtab oxc_validate_store_dataclause_vars(oxdir d)
 
 /* Count function parameters
  */
-
 static
 int count_paramlist_vars(astdecl d)
 {
@@ -617,6 +639,7 @@ int count_paramlist_vars(astdecl d)
 	return (0);
 }
 
+
 int count_function_params(astdecl d)
 {
 	d = d->decl;          /* go to the direct declarator */
@@ -630,7 +653,6 @@ int count_function_params(astdecl d)
 
 /* Store info re. function parameters
  */
-
 static
 tfparam *info_paramlist_vars(astdecl d, tfparam *p)
 {
@@ -700,7 +722,6 @@ void info_function_params(astdecl d, tfparam *p)
 
 /* Store info re. function parameters
  */
-
 static
 tfparam *types_paramlist_vars(astdecl d, tfparam *p)
 {
@@ -742,6 +763,7 @@ tfparam *types_paramlist_vars(astdecl d, tfparam *p)
 	}
 	return (0);
 }
+
 
 void types_function_params(astdecl d, tfparam *p)
 {
@@ -840,14 +862,14 @@ void tf_sizeexpr_make(astexpr *tree)
 }
 
 
-static char inparam_str[16];
+static char inparam_str[32];
 static char *inparam(int i)
 { sprintf(inparam_str, "_ompix_%d", i); return (inparam_str); }
 #define CALLWAY(p) ((p).intent == OX_OCREDUCE ? CALL_BY_RED((p).op) :\
                     (p).intent == OX_OCOUT    ? CALL_BY_RES :\
                     (p).intent == OX_OCINOUT  ? CALL_BY_REF :\
-                    CALL_BY_PTR)
-/* OX_OCIN - CALL_BY_VAL ditched */
+                   ((p).intent == OX_OCIN && (p).size == 1) ? CALL_BY_PTR :\
+                    CALL_BY_VAL)
 /* ((p).ptr ? CALL_BY_PTR : CALL_BY_VAL)) */
 
 
@@ -883,7 +905,7 @@ astexpr callargs_tree(astexpr *ca, taskfunc tf)
 		}
 	}
 	str_truncate(typstr); str_printf(typstr, "%d", tf->p[0].type);
-	expr = CommaList(CommaList(e, Constant(strdup(str_string(typstr)))),
+	expr = Comma3(e, Constant(strdup(str_string(typstr))),
 	                 Constant(strdup(CALLWAY(tf->p[0]))));
 	for (i = 1; i < tf->np; i++)     /* .. and the rest */
 	{
@@ -900,9 +922,8 @@ astexpr callargs_tree(astexpr *ca, taskfunc tf)
 			}
 		}
 		str_truncate(typstr); str_printf(typstr, "%d", tf->p[i].type);
-		expr = CommaList(expr, CommaList(
-		                   CommaList(e, Constant(strdup(str_string(typstr)))),
-		                   Constant(strdup(CALLWAY(tf->p[i])))));
+		expr = Comma4(expr, e, Constant(strdup(str_string(typstr))),
+		                       Constant(strdup(CALLWAY(tf->p[i]))));
 	}
 
 	for (i = 0; i < tf->np; i++)  /* finally the actual arguments */
@@ -947,18 +968,31 @@ int count_callargs(astexpr e)
 			return (count_callargs(e->left) + count_callargs(e->right));
 }
 
+/*spec_flag
+LSB->MSB
+(byte0 - spmd flags):
+ 1: spmd (no master)
+ 3: here
+ 4: remote
+
+(byte1 - TeQ flags):
+ 0: do not use EFTeQ
+ 1: has float
+ 2: has double
+ 4: int only
+ 
+(bytes {2-3} - TeQ task weight)
+range 0 - 65536
+*/
 
 static
-aststmt ox_func2task_call(astexpr *fc, taskfunc tf, bool detached, int tied,
-                          bool atall, astexpr atnode, astexpr atworker)
+aststmt ox_func2task_call(astexpr *fc, taskfunc tf, bool detached, int tied, 
+                          bool atall, astexpr atnode, astexpr atworker,
+						  int spec_flag)
 {
 	int        i, n = count_callargs((*fc)->right);
-	astexpr    *ca;
-	aststmt    st = NULL;           /* temportary declarations */
-	static str tstr = NULL;
-
-	if (tstr == NULL) tstr = Strnew();
-	else str_truncate(tstr);
+	astexpr    *ca, flag_expr;
+	aststmt    st = NULL;           /* temporary declarations */
 
 	if (atall && atnode != NULL)
 		exit_error(1, "(%s, line %d) OMPi-X error:\n\t"
@@ -985,7 +1019,7 @@ aststmt ox_func2task_call(astexpr *fc, taskfunc tf, bool detached, int tied,
 					       st,
 					       Declaration(ast_spec_copy_nosc(tf->p[i].decl->spec),
 					                   InitDecl(
-					                     xc_decl_rename(
+					                     decl_rename(
 					                       ast_decl_copy(tf->p[i].decl->decl),
 					                       Symbol(inparam(i))
 					                     ),
@@ -996,42 +1030,38 @@ aststmt ox_func2task_call(astexpr *fc, taskfunc tf, bool detached, int tied,
 			break;
 		};
 
-	str_printf(tstr, "%d", tf->np);
+
+	flag_expr = (spec_flag) ? numConstant(spec_flag) : numConstant(0);
+	if (atall)
+		flag_expr = numConstant(1);
+    
 	*fc = FunctionCall(
 	        IdentName("torc_create_ox"),
 	        CommaList(
-	          CommaList(
-	            CommaList(
-	              atall ?  numConstant(-2) :             /* 1 (atnode(all)) */
-	              atnode ? ast_expr_copy(atnode) :       /* 1 (atnode(expr)) */
-	              numConstant(-1),              /* 1 (no placement) */
-	              atworker ? ast_expr_copy(atworker) :   /* 2 (atworker(expr)) */
-	              numConstant(-1)             /* 2 (no placement) */
-	            ),
-	            CommaList(
-	              numConstant(detached ? 1 : 0),         /* 3 (detached flag) */
-	              numConstant(tied == -1 ? -1 :
-	                          tied == 0  ? 0 : 1)        /* 4 (tied flag) */
+	          Comma7(
+	             ast_expr_copy(flag_expr),              /* 1 (special cases flags) */
+	            (atnode ? ast_expr_copy(atnode) :       /* 2 (atnode(expr)) */
+	                      numConstant(-1)),             /* 2 (no placement) */
+	            (atworker ? ast_expr_copy(atworker) :   /* 3 (atworker(expr)) */
+	                       numConstant(-1)),            /* 3 (no placement) */
+	            numConstant(detached ? 1 : 0),          /* 4 (detached flag) */
+	            numConstant(tied == -1 ? -1 :
+	                        tied == 0  ? 0 : 1),        /* 5 (tied flag) */
+	            Identifier(torctask_func(tf->tfid)),    /* 6 (function) */
+	            (tf->has_callback ?
+	              Identifier(callback_func(tf->tfid)) : /* 7 (callback) */
+	              NullExpr()                            /* 7 (NULL callback) */
 	            )
 	          ),
-	          CommaList(
-	            CommaList(
-	              Identifier(tf->tfid),                  /* 5 (function) */
-	              tf->has_callback ?
-	              Identifier(callback_func(tf->tfid)) :  /* 6 (callback) */
-	              NullExpr()                             /* 6 (NULL callback) */
-	            ),
-	            tf->np == 0 ?
-	            numConstant(0) :                       /* 7 (0 args) */
-	            CommaList(
-	              Constant(strdup(str_string(tstr))),  /* 7,<args> */
-	              callargs_tree(ca, tf)
-	            )
-	          )
+	          tf->np == 0 ? numConstant(0) :            /* 8 (0 args) */
+	                        CommaList(
+	                          numConstant(tf->np),      /* 8 (# args) */
+	                          callargs_tree(ca, tf))    /* 9..., the args */
 	        )
 	      );
 
 	free_callargs_table(n, ca);
+
 
 	return (st);
 }
@@ -1080,10 +1110,87 @@ astexpr ox_atworker(oxdir d)
 }
 
 
+static
+astexpr ox_if(oxdir d)
+{
+	oxclause e;
+
+	return ((e = ox_has_clause(d->clauses, OX_OCIF)) ? e->u.expr : NULL);
+}
+
+static 
+astexpr ox_hint(oxdir d)
+{
+	oxclause e;
+
+	return ((e = ox_has_clause(d->clauses, OX_OCHINTS)) ? e->u.expr : NULL);
+}
+
+
+
+unsigned int process_hint_list(astexpr hintexpr)
+{
+	int i = 0;
+	unsigned int flags = 0;
+	astexpr nd = NULL;
+
+
+
+	nd = hintexpr;
+	if (nd->type != COMMALIST){
+		warning("OMPi-X warning:\n\t"
+		        "hint list must be of type (flags, int_weight, float weight),"
+				"TeQ will not be enabled for this task creation\n");
+		return 0;
+	}
+
+	// Item count == i + (2 leaves)
+	while(1)
+	{
+		// Reached leaf commalist
+		if (nd->left->type != COMMALIST) break;
+
+		if (nd->right->type != CONSTVAL){
+			warning("OMPi-X warning:\n\t"
+		        "hint list must contain only numerical constant\n");
+			return 0;
+		}
+		nd = nd->left;
+		i++;
+
+	}
+
+	if (i != 1){
+		warning("OMPi-X warning:\n\t"
+		        "hint list must be of type (flags, int_weight, float weight),"
+				"TeQ will not be enabled for this task creation\n");
+		return 0;
+	}
+
+
+	if (nd->left->type != CONSTVAL ||
+		nd->right->type != CONSTVAL){
+		warning("OMPi-X warning:\n\t"
+		        "hint list must contain only numerical constants\n");
+		return 0;
+	}
+
+
+
+	nd = hintexpr;
+	flags |= atoi(nd->left->left->u.str) << 8; // Flags
+	flags |= atoi(nd->left->right->u.str) << 24; // Task weight
+
+	return flags;
+}
+
+
 void ox_xform_task(aststmt *t)
 {
-	aststmt  new, tempdecls;
+	aststmt  new, tempdecls, bodycopy = ast_stmt_copy((*t)->u.ox->body);
+	astexpr  ifexpr = NULL, hintexpr = NULL;
 	taskfunc tf;
+	int spec_flag = 0;
 
 	oxcon_xform(&((*t)->u.ox));
 	assert((*t)->u.ox->body->type == EXPRESSION &&
@@ -1099,20 +1206,38 @@ void ox_xform_task(aststmt *t)
 	ox_validate_clauses((*t)->u.ox->directive->type,
 	                    (*t)->u.ox->directive->clauses);
 
+    
+	if      (ox_has_clause((*t)->u.ox->directive->clauses, OX_OCLOCAL))
+		spec_flag = 3;
+    else if (ox_has_clause((*t)->u.ox->directive->clauses, OX_OCREMOTE))
+		spec_flag = 4;
+
+	if (ox_has_clause((*t)->u.ox->directive->clauses, OX_OCHINTS)){
+		hintexpr = ox_hint((*t)->u.ox->directive);
+
+		spec_flag |= process_hint_list(hintexpr);
+	}
+
 	/* work around the IN scalar parameters */
 	tempdecls = ox_func2task_call(&((*t)->u.ox->body->u.expr), tf,
-	                              ox_has_clause((*t)->u.ox->directive->clauses, OX_OCDETACHED) ? true : false,
-	                              ox_has_clause((*t)->u.ox->directive->clauses, OX_OCTIED) ? 1 :
-	                              ox_has_clause((*t)->u.ox->directive->clauses, OX_OCUNTIED) ? 0 : -1,
-	                              ox_has_clause((*t)->u.ox->directive->clauses, OX_OCATALL) ? true : false,
-	                              ox_atnode((*t)->u.ox->directive), ox_atworker((*t)->u.ox->directive));
-	new = BlockList(oxdir_commented((*t)->u.ox->directive),
-	                (tempdecls) ?
-	                Compound(BlockList(tempdecls, (*t)->u.ox->body)) :
-	                (*t)->u.ox->body);
+		ox_has_clause((*t)->u.ox->directive->clauses, OX_OCDETACHED) ? true : false,
+		ox_has_clause((*t)->u.ox->directive->clauses, OX_OCTIED) ? 1 :
+		ox_has_clause((*t)->u.ox->directive->clauses, OX_OCUNTIED) ? 0 : -1,
+		ox_has_clause((*t)->u.ox->directive->clauses, OX_OCATALL) ? true : false,
+		ox_atnode((*t)->u.ox->directive), ox_atworker((*t)->u.ox->directive),
+		spec_flag);
+
+	new = (tempdecls) ?
+	         Compound(BlockList(tempdecls, (*t)->u.ox->body)) : (*t)->u.ox->body;
+	if ((ifexpr = ox_if((*t)->u.ox->directive)))
+		new = BlockList(oxdir_commented((*t)->u.ox->directive),
+		                If(ifexpr, new, bodycopy));
+	else
+		new = BlockList(oxdir_commented((*t)->u.ox->directive), new);
 	new->parent = (*t)->parent;   /* parantize correctly */
 	free(*t);
 	*t = new;
+	
 }
 
 
@@ -1154,7 +1279,8 @@ void showtaskfunc(taskfunc tf)
 void ox_validate_clauses(enum oxdircontype dirtype, oxclause t)
 {
 	int hastied = 0, hasstride = 0, hasstart = 0, hasscope = 0,
-	    hasatnode = 0, hasatall = 0, hasatworker = 0, hasdetached = 0;
+	    hasatnode = 0, hasatall = 0, hasatworker = 0, hasdetached = 0,
+	    hasif = 0, hashints = 0;
 
 	if (t == NULL) return;
 	if (t->type == OX_OCLIST)
@@ -1179,6 +1305,32 @@ void ox_validate_clauses(enum oxdircontype dirtype, oxclause t)
 				           t->file->name, t->l, oxdirnames[dirtype]);
 			break;
 		case OX_OCATNODE:
+		case OX_OCLOCAL:
+		case OX_OCREMOTE:
+			break;
+		case OX_OCIF:
+			if (hasif)
+				exit_error(1, "(%s, line %d) OMPi-X error:\n\t"
+				           "multiple if clauses are not allowed in a directive\n",
+				           t->file->name, t->l);
+			hasif = 1;
+			if (dirtype != OX_DCTASK)
+				exit_error(1, "(%s, line %d) OMPi-X error:\n\t"
+				           "if clauses aren't allowed in `%s' directives\n",
+				           t->file->name, t->l, oxdirnames[dirtype]);
+			break;
+		case OX_OCHINTS:
+			if (hashints)
+				exit_error(1, "(%s, line %d) OMPi-X error:\n\t"
+				           "multiple hint clauses are not allowed in a directive\n",
+				           t->file->name, t->l);
+			hashints = 1;
+			if (dirtype != OX_DCTASK)
+				exit_error(1, "(%s, line %d) OMPi-X error:\n\t"
+				           "if clauses aren't allowed in `%s' directives\n",
+				           t->file->name, t->l, oxdirnames[dirtype]);
+			break;
+			break;
 		case OX_OCATALL:
 			if (hasatnode)
 				exit_error(1, "(%s, line %d) OMPi-X error:\n\t"

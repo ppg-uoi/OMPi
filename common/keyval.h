@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* keyval.h -- A simple reader for key-value files */
@@ -30,7 +30,9 @@
 #define KV_KEYLEN    512
 #define KV_VALUELEN  1024
 
+typedef void (*kv_action_t)(char *key, char *value, void *userarg);
+
 /* act() will be called with each key-value pair found */
-extern void keyval_read(FILE *fp, void (*act)(char *key, char *value));
+extern void keyval_read(FILE *fp, kv_action_t act, void *userarg);
 
 #endif 

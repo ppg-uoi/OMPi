@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "sysdeps.h"
@@ -36,21 +36,41 @@ void _bad_fence(void)
 #endif
 
 
-/* Determine the # of processors
+/* Determine the # of processors available (online)
  */
 int ort_get_num_procs(void)
 {
 	int np;
 #ifdef __SYSOS_irix
-	np = sysconf(_SC_NPROC_ONLN);
+	np = (int) sysconf(_SC_NPROC_ONLN);
 #else
-	np = sysconf(_SC_NPROCESSORS_ONLN);
+	np = (int) sysconf(_SC_NPROCESSORS_ONLN);
 #endif
 	if (np <= 0)
 	{
 		extern void ort_warning(char *, ...);   /* So icc does not complain */
-		ort_warning("cannot determine the number of processors; assuming %d.\n",
+		ort_warning("cannot determine the number of processors available; assuming %d.\n",
 		            np = 1);
 	}
 	return (np);
 }
+
+/* Determine the # of processors configured
+ */
+int ort_get_num_procs_conf(void)
+{
+	int np;
+#ifdef __SYSOS_irix
+	np = (int) sysconf(_SC_NPROC_CONF);
+#else
+	np = (int) sysconf(_SC_NPROCESSORS_CONF);
+#endif
+	if (np <= 0)
+	{
+		extern void ort_warning(char *, ...);   /* So icc does not complain */
+		ort_warning("cannot determine the number of processors configured; assuming %d.\n",
+		            np = 1);
+	}
+	return (np);
+}
+

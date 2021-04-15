@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_parallel.c -- too big a transformation to be part of ast_xform! */
@@ -34,7 +34,8 @@
 #include "ast_show.h"
 #include "dfa.h"
 
-static autoScopeSets as;
+static autoshattr_t as;
+
 
 vartype_t xp_implicitDefaultAuto(setelem(vars) s)
 {
@@ -53,12 +54,14 @@ vartype_t xp_implicitDefaultAuto(setelem(vars) s)
 	return DCT_BYREF;
 }
 
+
 vartype_t xp_implicitDefault(setelem(vars) s)
 {
-	if (s->value == OCAUTO)
+	if (s->value.clause == OCAUTO)
 		return xp_implicitDefaultAuto(s);
 	return DCT_BYREF;
 }
+
 
 /* Returns the type of the proc_bind clause
  */
@@ -67,16 +70,20 @@ static int xp_procbind(ompcon t)
 	ompclause c = xc_ompcon_get_unique_clause(t, OCPROCBIND);
 
 	if (c == NULL)
-		return omp_proc_bind_true;
+		return omp_proc_bind_false; /* No proc_bind() clause */
 
 	switch (c->subtype)
 	{
-		case OC_bindmaster:
+		case OC_bindprimary:
+			return omp_proc_bind_primary;
+		case OC_bindmaster: /* Deprecated as of OpenMP v5.1 */
 			return omp_proc_bind_master;
 		case OC_bindclose:
 			return omp_proc_bind_close;
 		case OC_bindspread:
 			return omp_proc_bind_spread;
+		default:
+			break;
 	}
 
 	// Bug
@@ -85,6 +92,7 @@ static int xp_procbind(ompcon t)
 	           "unknown proc_bind type '%s'.\n\t",
 	           t->directive->file->name, clausesubs[c->subtype]);
 }
+
 
 aststmt xp_handle_copyin(set(vars) s, char *structVariable)
 {
@@ -99,33 +107,27 @@ aststmt xp_handle_copyin(set(vars) s, char *structVariable)
 		/* Copyin variables have been handled as shared by outline. We first
 		 * check if the variable is indeed copyin
 		 */
-		if (e->value != OCCOPYIN)
+		if (e->value.clause != OCCOPYIN)
 			continue;
 
 		stentry orig = symtab_get(stab, e->key, IDNAME);
 		astexpr init;
 
-
 		init = /* ( e->scopelevel == -10 ) ?
 		         Identifier( tp_new_name(var) ) : */  /* The initializer/source */
-		         UnaryOperator(
-		           UOP_star,
-		           Parenthesis(                       /* = *(_thrarg->var) */
-		             PtrField(IdentName(structVariable), e->key)
-		           )
-		         );
+		       DerefParen(PtrField(IdentName(structVariable), e->key));
 
 		if (!orig->isarray)           /* Plain assignment */
 			tmp = Expression(            /* *var = <orig_var> */
 			        Assignment(
-			          UnaryOperator(UOP_star, Identifier(e->key)),
+			          Deref(Identifier(e->key)),
 			          ASS_eq,
 			          init
 			        )
 			      );
 		else                       /* Array assignment, like in firstprivates */
-			tmp = xc_memcopy(UnaryOperator(UOP_star, Identifier(e->key)), init,
-			                 Sizeof(UnaryOperator(UOP_star, Identifier(e->key))));
+			tmp = xc_memcopy(Deref(Identifier(e->key)), init,
+			                 Sizeof(Deref(Identifier(e->key))));
 
 		st = (st) ? BlockList(st, tmp) : tmp;
 	}
@@ -133,61 +135,48 @@ aststmt xp_handle_copyin(set(vars) s, char *structVariable)
 	return st;
 }
 
+
 void xform_parallel(aststmt *t, int iscombined)
 {
 	static int thrnum = 0;
 
-	astexpr      numthrexpr = NULL, ifexpr = NULL;
-	aststmt      copyininit;
-	ompclause    c;
-	int          procbind_type;
-	outcome_t    op;
-	char         clabel[22];
+	astexpr    numthrexpr = NULL, ifexpr = NULL;
+	aststmt    copyininit;
+	ompclause  c, def = xc_ompcon_get_clause((*t)->u.omp, OCDEFAULT);
+	int        procbind_type;
+	outcome_t  op;
+	char       clabel[22];
 
 	static outpars_t oo =
 	{
+		true,                   // structbased
 		"",                     //+functionName
 		"ort_execute_parallel", // functionCall
 		NULL,                   //+extraParameters
-		true,                   // byvalue_type (by name)
+		BYVAL_byname,           // byvalue_type (by name)
 		false,                  //+global_byref_in_struct
 		"__shvt__",             // structName
 		"_shvars",              // structVariable
 		NULL,                   // structInitializer
 		xp_implicitDefault,     // implicitDefault function
-		NULL                    // deviceexpr
+		NULL,                   // deviceexpr
+		true,                   // addComment
+		NULL                    // thestmt
 	};
-
+	
 	/* The name of the label used for canceling. We use line number to avoid
 	 * conflicts (there shouldn't be any since the code is outlined but we
 	 * use it anyway incase we inline the parallel code in the future)
 	 */
 	snprintf(clabel, 22, "CANCEL_parallel_%d", (*t)->l);
 
-	/**************************************************************************/
-	/*                                 Agelos                                 */
-	/**************************************************************************/
-	/* Search the list for the autoscoping results of current parallel region */
-	/* TODO: add when bug fixed 
-	parNode *p = isInAutoList((*t)->l);
-	*/
-	
-	/* We store them at set group "as" */
-	/* TODO: add when bug fixed 
-	assert(p != NULL);
-	as = p->a;
-	*/
-
-	//Check for default auto clause
-	ompclause def = xc_ompcon_get_clause((*t)->u.omp, OCDEFAULT);
-	if (def && def->subtype == OC_auto)
-		oo.implicitDefault = xp_implicitDefaultAuto;
-	else
-		oo.implicitDefault = xp_implicitDefault;
-	/**************************************************************************/
-	/*                                                                        */
-	/**************************************************************************/
-
+	if (enableAutoscope) /* Agelos */
+	{
+		assert(dfa_parreg_get_results((*t)->l) != NULL);
+		as = *dfa_parreg_get_results((*t)->l);
+		if (def && def->subtype == OC_auto)
+			oo.implicitDefault = xp_implicitDefaultAuto;
+	}
 
 	/* (1) Check for if and num_threads clauses and keep a copy
 	 */
@@ -203,11 +192,9 @@ void xform_parallel(aststmt *t, int iscombined)
 	/* (3) Call outline_OpenMP
 	 */
 	sprintf(oo.functionName, "_thrFunc%d_", thrnum++);
-	oo.extraParameters = CommaList(  // <numthread>, combined, <procbind>
-	                       CommaList(
-	                         numthrexpr ? numthrexpr : numConstant(-1),
-	                         numConstant(iscombined)
-	                       ),
+	oo.extraParameters = Comma3(  // <numthread>, combined, <procbind>
+	                       numthrexpr ? numthrexpr : numConstant(-1),
+	                       numConstant(iscombined),
 	                       numConstant(procbind_type)
 	                     );
 	//If we are in a target region add global shared variables to the struct
@@ -215,52 +202,68 @@ void xform_parallel(aststmt *t, int iscombined)
 		oo.global_byref_in_struct = true;
 	else
 		oo.global_byref_in_struct = false;
+	oo.thestmt = *t;
 	op = outline_OpenMP(t, oo);
 
 	/* (4) Add if clause
 	 */
 	if (ifexpr)                    /* Check if we have an if() clause */
 	{
-		aststmt parent = op.functioncall->parent;
-
-		//Replace call with if(ifexpr) execute_parallel else execute_serial
-		//WARNING replacing parent->body can cause problems, for example if
-		//parent is IF or STATEMENTLIST we may not be the body of our parent
-		//In this case if there are any shared/firstprivate variables the parent
-		//is a STATEMENTLIST with us as body, else it is a COMPOUND
-		parent->body = If(ifexpr, op.functioncall,
+		aststmt parent = op.repl_funcall->parent;
+		aststmt new = If(ifexpr, ast_stmt_copy(op.repl_funcall),
 		                  /* ort_execute_serial(thrFunc, (void *) __shvt__/0); */
 		                  FuncCallStmt(
 		                    IdentName("ort_execute_serial"),
 		                    CommaList(
 		                      IdentName(oo.functionName),
 		                      CastVoidStar(
-		                        op.funcstruct ?
+		                        op.func_struct ?
 		                        UOAddress(IdentName(oo.structName)) :
 		                        numConstant(0)
 		                      )
 		                    )
 		                  )
 		                 );
-		//Parentize
-		ast_stmt_parent(parent, parent->body);
+		*(op.repl_funcall) = *new;
+		ast_stmt_parent(parent, op.repl_funcall);
+
+		//Replace call with if(ifexpr) execute_parallel else execute_serial
+		//WARNING replacing parent->body can cause problems, for example if
+		//parent is IF or STATEMENTLIST we may not be the body of our parent
+		//In this case if there are any shared/firstprivate variables the parent
+		//is a STATEMENTLIST with us as body, else it is a COMPOUND
+// 		parent->body = If(ifexpr, op.repl_funcall,
+// 		                  /* ort_execute_serial(thrFunc, (void *) __shvt__/0); */
+// 		                  FuncCallStmt(
+// 		                    IdentName("ort_execute_serial"),
+// 		                    CommaList(
+// 		                      IdentName(oo.functionName),
+// 		                      CastVoidStar(
+// 		                        op.func_struct ?
+// 		                        UOAddress(IdentName(oo.structName)) :
+// 		                        numConstant(0)
+// 		                      )
+// 		                    )
+// 		                  )
+// 		                 );
+// 		//Parentize
+// 		ast_stmt_parent(parent, parent->body);
 	}
 
 	/* (5) Handle copyin variables
 	 */
 	copyininit = xp_handle_copyin(op.usedvars[DCT_BYREF], oo.structName);
 	if (copyininit)
-		out_insert_before(
-		  op.functionbody,
-		  BlockList(
-		    BlockList(verbit("/* copyin initialization(s) */"), copyininit),
-		    BarrierCall()
+		ast_stmt_prepend(
+		  op.func_regcode,
+		  Block3(
+		    verbit("/* copyin initialization(s) */"), copyininit, BarrierCall()
 		  ));
 
 	/* (6) Place a barrier at the end of the function
 	 */
-	out_insert_before(
-	  op.returnstm,  /* ort_taskwait(2);  */
+	ast_stmt_prepend(
+	  op.func_return,  /* ort_taskwait(2);  */
 	  Labeled(
 	    Symbol(clabel), /* label used for cancel */
 	    FuncCallStmt(

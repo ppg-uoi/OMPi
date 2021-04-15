@@ -17,7 +17,7 @@
 #
 #    You should have received a copy of the GNU General Public License
 #    along with OMPi; if not, write to the Free Software
-#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #
 ##   This file must be processed by automake
 -include Makelib.conf
@@ -46,4 +46,3 @@ EXTRA_DIST = ortconf.$(LIBRARY_NAME) PUT LIBRARY HEADERS HERE
 # The files to install in the lib directory
 # -----
 ompilib_DATA = libort.a ortconf.$(LIBRARY_NAME)
-

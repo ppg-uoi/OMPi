@@ -17,12 +17,14 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-/* ort_params.h */
+/* params.h for ORT */
 
 /*
+ * 2019/11/14:
+ *   Values revised because of parade.
  * 2014/06/16:
  *   First time around.
  */
@@ -30,22 +32,20 @@
 #ifndef __PARAMS_H__
 #define __PARAMS_H__
 
-/* ort.h */
-#define MAX_BAR_THREADS   64   /* Maximum number of threads per team */
-
 /* ort_env.c */
-#define MAXPLACELEN       1024 /* Maximum number of OpenMP places */
+#define MAX_PLACE_LEN      1023 /* M number of resources in a place */
 
 /* ort_prive.h */
-#define TASK_QUEUE_SIZE   24   /* Size of per-thread queues that store pending tasks  */
-#define MAXACTIVEREGIONS  50   /* Maximum number of concurrent active regions */
-#define YIELD_IMMEDIATELY 0    /* Milliseconds used to yield immediately */
-#define YIELD_FREQUENTLY  50   /* Milliseconds used to yield frequently */
-#define YIELD_OCCASIONALY 150  /* Milliseconds used to yield occasionaly */
-#define YIELD_RARELY      500  /* Milliseconds used to yield barely */
-#define BAR_YIELD         50   /* Milliseconds used to for barrier yield */
+#define TASK_QUEUE_SIZE    24   /* Per-thread queue size for pending tasks  */
+#define MAX_ACTIVE_REGIONS 50   /* Max number of concurrently active regions */
+#define YIELD_IMMEDIATELY  0    /* # busy-waiting repetitions before yielding */
+#define YIELD_FREQUENTLY   50   /* ditto */
+#define YIELD_OCCASIONALY  150  /* ditto */
+#define YIELD_RARELY       500  /* ditto */
+#define BAR_YIELD          50   /* ditto for barriers */
 
-#define MAXNTHRLEVS       10   /* Max. number of levels for OMP_NUM_THREADS */
-#define MAXBINDLEVS       10   /* Max. thread binding level (OMP_PROC_BIND) */
+#define MAX_NUMTHR_LEVELS  10   /* Max. number of levels for OMP_NUM_THREADS */
+#define MAX_BIND_LEVELS    10   /* Max. thread binding level (OMP_PROC_BIND) */
 
 #endif
+

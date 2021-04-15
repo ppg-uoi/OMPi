@@ -17,17 +17,17 @@
 #
 #    You should have received a copy of the GNU General Public License
 #    along with OMPi; if not, write to the Free Software
-#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #
 ##   This file must be processed by automake
 
 # -----
 # All directories known to us
 # -----
-DIST_SUBDIRS = host @modpaths@
+DIST_SUBDIRS = host devices
 
 # Which ones we should be making
-SUBDIRS=host @availmodpaths@
+SUBDIRS=host devices
 
-EXTRA_DIST = DeviceTemplate rt_common.h
+EXTRA_DIST = rt_common.h
 

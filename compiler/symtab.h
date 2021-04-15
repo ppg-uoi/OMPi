@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* symtab.h */
@@ -33,7 +33,7 @@ typedef struct symbol_
 
 
 #include "ast.h"
-#include "boolean.h"
+#include "stddefs.h"
 
 
 /*
@@ -62,19 +62,20 @@ typedef struct stentry_ *stentry;
 struct stentry_
 {
 	symbol    key;          /* The symbol */
-	int       ival;         /* Two ints to put anything */
+	int       ival;         /* Three ints and a ptr to put anything */
 	int       vval;
+	int       mval;           /* FTM, it is only used to hold clause modifiers */
+	void     *pval; 
 
 	astspec   spec;         /* The specifier */
 	astdecl   decl;         /* The bare declarator */
 	astdecl   idecl;        /* initdeclarator (includes decl) */
+	aststmt   funcdef;      /* The function definition statement (for FUNCNAME) */
 
 	namespace space;        /* 1 table for all spaces */
 	bool      isarray;      /* Non-scalar */
 	bool      isthrpriv;    /* True if it is a threadprivate var */
-	int       isindevenv;   /* 1: declare target
-	                         * 2: target data
-	                         * 3: global identifiers created while outlining */
+	int       isindevenv;   /* FALSE if not already in the device environment  */
 	int       scopelevel;   /* The scope it was declared in */
 	stentry   bucketnext;   /* for the bucket */
 	stentry   stacknext;    /* for the scope stack */

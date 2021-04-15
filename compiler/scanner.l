@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 
@@ -49,7 +49,7 @@ int         __has_omp = 0,      /* True if we found at least 1 OpenMP #pragma */
             __has_affinitysched = 0;
 
 void count(), sharp(), gobbleline(), gobblecomment();
-int  checkomp(int type, int return_if_true);
+int  checkomp(int type, int return_if_true), pragma_other();
 
 #define IdentOrType() \
   ( symtab_get(stab,Symbol(yytext),TYPENAME) != NULL ? TYPE_NAME : IDENTIFIER )
@@ -57,7 +57,7 @@ int  checkomp(int type, int return_if_true);
 /* The following variables are used for tracking the original filenames and
  * original line numbers, because our scanner/parser uses preprocessed
  * files. To do this, we parse the sharps produced by the preprocessor,
- * which mark the line number of the original file, in the of the form:
+ * which mark the line number of the original file, in the form:
  *   # 1 "test.c"
  */
 static char origfile_name[SCANNER_STR_SIZES];  // original file name
@@ -115,6 +115,9 @@ static int  start_token = 0;   // For starting with a particular token
                          count();
                          on_omp_line = __has_omp = 1;
                          return (PRAGMA_OMP_CANCELLATIONPOINT);
+                       }
+[ \t]*"#"[ \t]*"pragma" {
+                         return ( pragma_other() );
                        }
 [ \t]*"#"[ \t]*"line"  {
                          sharp();
@@ -212,13 +215,37 @@ static int  start_token = 0;   // For starting with a particular token
 "thread_limit"         { return checkomp(0, OMP_THREADLIMIT); }
 "dist_schedule"        { return checkomp(0, OMP_DISTSCHEDULE); }
 "depend"               { return checkomp(0, OMP_DEPEND); }
-"in"                   { return checkomp(0, OMP_IN); }
-"out"                  { return checkomp(0, OMP_OUT); }
-"inout"                { return checkomp(0, OMP_INOUT); }
+"in"                   { return checkomp(2, OMP_IN); }
+"out"                  { return checkomp(2, OMP_OUT); }
+"inout"                { return checkomp(2, OMP_INOUT); }
 "taskgroup"            { return checkomp(0, OMP_TASKGROUP); }
 "seq_cst"              { return checkomp(0, OMP_SEQ_CST); }
 "cancel"               { return checkomp(0, OMP_CANCEL); }
 "initializer"          { return checkomp(0, OMP_INITIALIZER); }
+
+   /* OpenMP 4.5 */
+
+"hint"                 { return checkomp(2, OMP_HINT); }
+"source"               { return checkomp(0, OMP_SOURCE); }
+"sink"                 { return checkomp(0, OMP_SINK); }
+"release"              { return checkomp(0, OMP_RELEASE); }
+"delete"               { return checkomp(0, OMP_DELETE); }
+"always"               { return checkomp(0, OMP_ALWAYS); }
+"enter"                { return checkomp(0, OMP_ENTER); }
+"exit"                 { return checkomp(0, OMP_EXIT); }
+"is_device_ptr"        { return checkomp(0, OMP_IS_DEVICE_PTR); }
+"use_device_ptr"       { return checkomp(0, OMP_USE_DEVICE_PTR); }
+"priority"             { return checkomp(0, OMP_PRIORITY); }
+"taskloop"             { return checkomp(0, OMP_TASKLOOP); }
+"threads"              { return checkomp(0, OMP_THREADS); }
+"link"                 { return checkomp(0, OMP_LINK); }
+"defaultmap"           { return checkomp(0, OMP_DEFAULTMAP); }
+"scalar"               { return checkomp(0, OMP_SCALAR); }
+"monotonic"            { return checkomp(0, OMP_MONOTONIC); }
+"nonmonotonic"         { return checkomp(0, OMP_NONMONOTONIC); }
+
+   /* OpenMP 4.5 */
+"primary"               { return checkomp(0, OMP_PRIMARY); }
 
   /*
    * OMPi-extension tokens
@@ -227,10 +254,10 @@ static int  start_token = 0;   // For starting with a particular token
 "taskdef"              { return checkomp(1, OMPIX_TASKDEF); }
 "uponreturn"           { return checkomp(1, OMPIX_UPONRETURN); }
 "tasksync"             { return checkomp(1, OMPIX_TASKSYNC); }
-"in"|"IN"|"In"         { return checkomp(1, OMPIX_IN); }
-"out"|"OUT"|"Out"      { return checkomp(1, OMPIX_OUT); }
-"inout"|"INOUT"|"Inout"|"InOut" {
-                         return checkomp(1, OMPIX_INOUT);
+"IN"|"In"              { return checkomp(1, OMP_IN); }
+"OUT"|"Out"            { return checkomp(1, OMP_OUT); }
+"INOUT"|"Inout"|"InOut" {
+                         return checkomp(1, OMP_INOUT);
                        }
 "atnode"|"ATNODE"|"Atnode"|"AtNode" {
                          return checkomp(1, OMPIX_ATNODE);
@@ -245,6 +272,8 @@ static int  start_token = 0;   // For starting with a particular token
 "nodes"                { return checkomp(1, OMPIX_NODES); }
 "workers"              { return checkomp(1, OMPIX_WORKERS); }
 "local"                { return checkomp(1, OMPIX_LOCAL); }
+"here"                 { return checkomp(1, OMPIX_HERE); }
+"remote"               { return checkomp(1, OMPIX_REMOTE); }
 "global"               { return checkomp(1, OMPIX_GLOBAL); }
 "tied"                 { return checkomp(1, OMPIX_TIED); }
 "detached"|"DETACHED"|"Detached" {
@@ -325,6 +354,10 @@ static int  start_token = 0;   // For starting with a particular token
 "__builtin_offsetof"   { count(); return(__BUILTIN_OFFSETOF); }
 "__builtin_types_compatible_p" { count();return(__BUILTIN_TYPES_COMPATIBLE_P); }
 "__attribute__"        { count(); return(__ATTRIBUTE__); }
+"__volatile__"         { count(); return(VOLATILE); /* Is this OK? */ }
+"__asm__"              { count(); return(__ASM__); }
+"__asm"                { count(); return(__ASM__); }
+"asm"                  { count(); return(__ASM__); }
 
   /*
    * Identifiers, constants and strings
@@ -417,7 +450,7 @@ static int  start_token = 0;   // For starting with a particular token
 
 int yywrap()
 {
-  return(1);
+	return(1);
 }
 
 
@@ -430,32 +463,57 @@ int yywrap()
  */
 void sharp()
 {
-  char c, line[SCANNER_STR_SIZES] = {0}, *s, *t;
-  int  lineno = -1;
+	char c, line[SCANNER_STR_SIZES] = {0}, *s, *t;
+	int  lineno = -1;
 
-  for (s = line; (c = input()) != '\n' && c != 0; )   /* Read in the line */
-    if (s-line < SCANNER_STR_SIZES-2)
-      *s++ = c;
+	for (s = line; (c = input()) != '\n' && c != 0; )   /* Read in the line */
+		if (s-line < SCANNER_STR_SIZES-2)
+			*s++ = c;
 
-  if (c == 0) return;          /* End of file - ignore anyways */
-  *s = 0;                      /* Ignore \n and force end of string */
-  thisfile_line++;             /* Update counters */
-  thisfile_column = 0;
+	if (c == 0) return;          /* End of file - ignore anyways */
+	*s = 0;                      /* Ignore \n and force end of string */
+	thisfile_line++;             /* Update counters */
+	thisfile_column = 0;
 
-  if ( sscanf(line, "%d", &lineno) < 0 ) return;   /* Nope -- no line number */
+	if ( sscanf(line, "%d", &lineno) < 0 ) return;   /* Nope -- no line number */
 
-  for (s = line; *s != '\"' && *s != 0; s++)       /* Find the " */
-    ;
-  if (*s == 0) return;                             /* Nope -- no file name */
+	for (s = line; *s != '\"' && *s != 0; s++)       /* Find the " */
+		;
+	if (*s == 0) return;                             /* Nope -- no file name */
 
-  for (t = (++s); *s != '\"' && *s != 0; s++)      /* Find the next " */
-    ;
-  if (t == s) return;                              /* Nope -- empty file name */
-  *s = 0;
+	for (t = (++s); *s != '\"' && *s != 0; s++)      /* Find the next " */
+		;
+	if (t == s) return;                              /* Nope -- empty file name */
+	*s = 0;
 
-  strncpy(origfile_name, t, SCANNER_STR_SIZES-1);
-  origfile_line = lineno;
-  marker_line   = thisfile_line;
+	strncpy(origfile_name, t, SCANNER_STR_SIZES-1);
+	origfile_line = lineno;
+	marker_line   = thisfile_line;
+}
+
+
+/* Called upon encountering a line starting with '#pragma' other than 
+ * an OpenMP one.
+ * We actually return this line so as to be output as-is.
+ */
+int pragma_other()
+{
+	char c, line[SCANNER_STR_SIZES] = {0}, *s, *t;
+	int  lineno = -1;
+
+	sprintf(line, "#pragma");
+	for (s = line+7; (c = input()) != '\n' && c != 0; )   /* Read in the line */
+		if (s-line < SCANNER_STR_SIZES-2)
+			*s++ = c;
+	*s = 0;                      /* Ignore \n and force end of string */
+	
+	strcpy(yylval.name, line);
+	if (c != 0)                  /* I.e. not end of file */
+	{
+		thisfile_line++;           /* Update counters */
+		thisfile_column = 0;
+	}
+	return (PRAGMA_OTHER);
 }
 
 
@@ -472,150 +530,150 @@ void gobbleline()
 
 
 /* Gobble spaces (returns the non-space char found)
- */
+*/
 char gobblespaces()
 {
-  char c;
-  for ( ; (c = input()) != 0 && isspace(c); )
-    if (c == '\n')
-    {
-      thisfile_line++;
-      thisfile_column = 0;
-    }
-    else
-      thisfile_column++;
-  if (c)
-    thisfile_column++;
-  return (c);
+	char c;
+	for ( ; (c = input()) != 0 && isspace(c); )
+		if (c == '\n')
+		{
+			thisfile_line++;
+			thisfile_column = 0;
+		}
+		else
+			thisfile_column++;
+	if (c)
+		thisfile_column++;
+	return (c);
 }
 
 
 /* Gobble till the end of comment (i.e. ignore C comments)
- * We actually don't need to recognize comments, since we scan a
- * file that has already been preprocessed. However, we need this
- * functionality for testing purposes.
- * The code is a bit dump, i.e. it won't handle nested comments,
- * and it won't check for strings.
- */
+* We actually don't need to recognize comments, since we scan a
+* file that has already been preprocessed. However, we need this
+* functionality for testing purposes.
+* The code is a bit dump, i.e. it won't handle nested comments,
+* and it won't check for strings.
+*/
 void gobblecomment()
 {
-  char c, done = 0;
+	char c, done = 0;
 
-  /* Never put the !done *after* the (c = input()) != 0. Order matters!! */
-  for ( ; !done && (c = input()) != 0; )
-  {
-    if (c == '\n')
-    {
-      thisfile_line++;               /* Update counters */
-      thisfile_column = 0;
-      continue;
-    }
-    thisfile_column++;
-    if (c == '*')
-    {
-      while ((c = input()) == '*')
-        thisfile_column++;
-      if (c == '\n')
-      {
-        thisfile_line++;             /* Update counters */
-        thisfile_column = 0;
-      }
-      else
-      {
-        thisfile_column++;
-        if (c == '/')
-          done = 1;
-      }
-    }
-  }
+	/* Never put the !done *after* the (c = input()) != 0. Order matters!! */
+	for ( ; !done && (c = input()) != 0; )
+	{
+		if (c == '\n')
+		{
+			thisfile_line++;               /* Update counters */
+			thisfile_column = 0;
+			continue;
+		}
+		thisfile_column++;
+		if (c == '*')
+		{
+			while ((c = input()) == '*')
+				thisfile_column++;
+			if (c == '\n')
+			{
+				thisfile_line++;             /* Update counters */
+				thisfile_column = 0;
+			}
+			else
+			{
+				thisfile_column++;
+				if (c == '/')
+					done = 1;
+			}
+		}
+	}
 }
 
 
 /* Gobble (but store) till the end of an attribute phrase ((...)).
- * The code is a bit dump, i.e. it won't handle strings with "))" in them.
- */
+* The code is a bit dump, i.e. it won't handle strings with "))" in them.
+*/
 int sc_scan_attribute(char **string)
 {
-  char c, done = 0, text[SCANNER_STR_SIZES];
-  int  n;
+	char c, done = 0, text[SCANNER_STR_SIZES];
+	int  n;
 
-  c = gobblespaces();
-  if (c != '(' || ((c = input()) != '(')) return (-1);
-  thisfile_column++;
-  text[0] = text[1] = '(';
+	c = gobblespaces();
+	if (c != '(' || ((c = input()) != '(')) return (-1);
+	thisfile_column++;
+	text[0] = text[1] = '(';
 
-  /* Never put the !done *after* the (c = input()) != 0. Order matters!! */
-  for (n = 2; !done && (c = input()) != 0 && n < SCANNER_STR_SIZES; )
-  {
-    text[n++] = c;
-    if (c == '\n')
-    {
-      thisfile_line++;               /* Update counters */
-      thisfile_column = 0;
-      continue;
-    }
-    thisfile_column++;
-    if (c == ')')
-    {
-      if ((c = input()) == ')')
-        done = 1;
-      text[n++] = c;
-      if (done)
-      {
-        text[n++] = 0;
-        *string = strdup(text);
-      }
-      thisfile_column++;
-    }
-  }
-  return ( (c == 0 || n >= SCANNER_STR_SIZES) ? -1 : 0 );
+	/* Never put the !done *after* the (c = input()) != 0. Order matters!! */
+	for (n = 2; !done && (c = input()) != 0 && n < SCANNER_STR_SIZES; )
+	{
+		text[n++] = c;
+		if (c == '\n')
+		{
+			thisfile_line++;               /* Update counters */
+			thisfile_column = 0;
+			continue;
+		}
+		thisfile_column++;
+		if (c == ')')
+		{
+			if ((c = input()) == ')')
+				done = 1;
+			text[n++] = c;
+			if (done)
+			{
+				text[n++] = 0;
+				*string = strdup(text);
+			}
+			thisfile_column++;
+		}
+	}
+	return ( (c == 0 || n >= SCANNER_STR_SIZES) ? -1 : 0 );
 }
 
 
 /* Update line/column counters & generate the thingy to return to the parser */
 void count()
 {
-  int i, nonempty = 0;
+	int i, nonempty = 0;
 
-  for (i = 0; yytext[i] != 0; i++)
-    if (yytext[i] == '\n')
-    {
-      thisfile_column = 0;
-      thisfile_line++;
-    }
-    else
-      if (yytext[i] == '\t')
-        thisfile_column += ( 8 - (thisfile_column % 8) );
-      else
-      {
-        thisfile_column++;
-        if (!isspace(yytext[i]))
-          nonempty = 1;
-      };
+	for (i = 0; yytext[i] != 0; i++)
+		if (yytext[i] == '\n')
+		{
+			thisfile_column = 0;
+			thisfile_line++;
+		}
+		else
+			if (yytext[i] == '\t')
+				thisfile_column += ( 8 - (thisfile_column % 8) );
+			else
+			{
+				thisfile_column++;
+				if (!isspace(yytext[i]))
+					nonempty = 1;
+			};
 
-  if (nonempty)
-    strcpy(yylval.name, yytext);
+	if (nonempty)
+		strcpy(yylval.name, yytext);
 }
 
 /* Returns "return_if_true" if on omp/ompi line else returns IdentOrType
- * type 0 checks for OpenMp line, 1 checks for ompi line, 2 checks both
- */
+* type 0 checks for OpenMp line, 1 checks for ompi line, 2 checks both
+*/
 int checkomp(int type, int return_if_true) {
-  count();
-  if ((type == 0 && on_omp_line) ||
-      (type == 1 && on_ompix_line) ||
-      (type == 2 && (on_omp_line || on_ompix_line)))
-    return(return_if_true);
-  else
-    return IdentOrType();
+	count();
+	if ((type == 0 && on_omp_line) ||
+		  (type == 1 && on_ompix_line) ||
+		  (type == 2 && (on_omp_line || on_ompix_line)))
+		return(return_if_true);
+	else
+		return IdentOrType();
 }
 
 /* Set everything up to scan from a string */
 void sc_scan_string(char *s)
 {
-  yy_scan_string(s);
-  *origfile_name = 0;
-  sc_set_filename("injected_code");
+	yy_scan_string(s);
+	*origfile_name = 0;
+	sc_set_filename("injected_code");
 }
 
 

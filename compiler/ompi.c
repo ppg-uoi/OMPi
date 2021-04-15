@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /*
@@ -34,6 +34,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/time.h>
 #include <assert.h>
 #include "ompi.h"
 #include "ast.h"
@@ -44,6 +45,7 @@
 #include "ast_show.h"
 #include "x_types.h"
 #include "x_target.h"
+#include "x_task.h"
 #include "cfg.h"
 #include "callgraph.h"
 #include "str.h"
@@ -57,13 +59,17 @@ bool           testingmode;  /* For internal testing only */
 char           *filename;    /* The file we parse */
 char           advert[256];  /* A string added to the top of generated files */
 
+#ifdef PORTABLE_BUILD
+static char *InstallPath; 
+#endif
+
 /* This is for taking care of main() in the parsed code;
  * OMPi generates its own main() and replaces the original one.
  */
 char *MAIN_NEWNAME   = "__original_main";  /* Rename the original main */
 bool hasMainfunc     = false; /* true if main() function is defined in the file */
 bool needMemcpy      = false; /* true if generated code includes memcpy()s */
-bool needMalloc      = false; /* true if generated code includes malloc()s */
+bool needMemset      = false; /* true if generated code includes memset()s */
 bool needLimits      = false; /* true if need limits.h constants (min/max) */
 bool needFloat       = false; /* true if need float.h constants (min/max) */
 bool nonewmain       = false; /* If true, we won't output a new "main()" */
@@ -71,22 +77,32 @@ bool processmode     = false; /* If true, turn on process mode */
 bool threadmode      = false; /* Will become true by default */
 bool enableOpenMP    = true;  /* If false, ignore OpenMP constructs */
 bool enableOmpix     = true;  /* Enable OMPi-extensions */
-bool enableCodeDup   = true;  /* Duplicate code where appropriate for speed */
 bool cppLineNo       = true;  /* Output precompiler line directives (# n) */
 bool showdbginfo     = false; /* Allow assorted debugging info on stderr */
+bool analyzeKernels  = false; /* Force kernel analysis for our C.A.R. system */
+bool oldReduction    = false; /* Force newer reduction code */
+bool enableAutoscope = false; /* No auto scoping analysis */
 int  mainfuncRettype = 0;     /* 0 = int, 1 = void */
+taskopt_e taskoptLevel = OPT_FAST;  /* Task code optimizations for speed */
 
-static str modstr;      /* String containing all used module names */
-static int usedmods;    /* # used modules */
+static str modstr;        /* String containing all used module names */
+static int usedmods;      /* # used modules */
 
 
 void append_new_main()
 {
 	if (!hasMainfunc) return;
 	
+#ifdef PORTABLE_BUILD
+	/* Pass the installation path before the first module name */
+	str_insert(modstr, 0, "\"");
+	str_insert(modstr, 0, InstallPath);
+	str_insert(modstr, 0, ", \"");
+#else
 	if (usedmods == 0)
 		modstr = Str(", \"dummy\"");
-
+#endif
+	
 	A_str_truncate();
 	str_printf(strA(),
 	           "/* OMPi-generated main() */\n"
@@ -98,7 +114,7 @@ void append_new_main()
 		if (enableOpenMP || testingmode || processmode)
 			str_printf(strA(),
 			           "  int _xval = 0;\n\n"
-			           "  ort_initialize(&argc, &argv, %d%s);\n"
+			           "  ort_initialize(&argc, &argv, 0, %d%s);\n"
 			           "  _xval = (int) %s(argc, argv);\n"
 			           "  ort_finalize(_xval);\n"
 			           "  return (_xval);\n",
@@ -113,7 +129,7 @@ void append_new_main()
 	{
 		if (enableOpenMP || testingmode || processmode)
 			str_printf(strA(),
-			           "  ort_initialize(&argc, &argv, %d%s);\n"
+			           "  ort_initialize(&argc, &argv, 0, %d%s);\n"
 			           "  %s(argc, argv);\n"
 			           "  ort_finalize(0);\n"
 			           "  return (0);\n",
@@ -143,16 +159,29 @@ void append_new_main()
 typedef enum {
 	OPTION(unknown) = -1, /* unknown option */
 	OPTION(nomain) = 0,   OPTION(procs),       OPTION(threads),
-	OPTION(nomp),         OPTION(nox),         OPTION(nocodedup),
+	OPTION(nomp),         OPTION(nox),         OPTION(oldred), 
 	OPTION(nolineno),     OPTION(showdbginfo), OPTION(usemod),
+	OPTION(taskopt0),     OPTION(taskopt1),    OPTION(taskopt2),
+	OPTION(drivecar),     OPTION(autoscope),
 	OPTION(lastoption)    /* dummy */
 } option_t;
 
 char *optnames[] = {
 	OPTNAME(nomain),      OPTNAME(procs),       OPTNAME(threads),
-	OPTNAME(nomp),        OPTNAME(nox),         OPTNAME(nocodedup),
-	OPTNAME(nolineno),    OPTNAME(showdbginfo), OPTNAME_L(usemod)
+	OPTNAME(nomp),        OPTNAME(nox),         OPTNAME(oldred),
+	OPTNAME(nolineno),    OPTNAME(showdbginfo), OPTNAME_L(usemod),
+	OPTNAME(taskopt0),    OPTNAME(taskopt1),    OPTNAME(taskopt2),
+	OPTNAME(drivecar),    OPTNAME(autoscope)
 };
+
+
+void showopts()
+{
+	int i;
+
+	for (i = 0; i < OPTION(lastoption); i++)
+		fprintf(stderr, "\t%s\n", optnames[i]);
+}
 
 
 option_t optid(char *arg)
@@ -172,22 +201,40 @@ option_t optid(char *arg)
 }
 
 
-int getopts(int argc, char *argv[])
+int getopts(int argc, char **argv)
 {
-	int i;
+	int i = 0;
 
+#ifdef PORTABLE_BUILD
+	/* In portable builds the 1st argument is the installation path */
+	InstallPath = argv[0];
+	argc--;
+	argv++;
+	fprintf(stderr, "InstallPath=%s, argc=%d, *argv=%s\n", InstallPath, argc, *argv);
+#endif
+	
 	modstr = Strnew();
 	for (i = 0; i < argc; i++)
 		switch ( optid(argv[i]) )
 		{
 			case OPTION(nomain):      nonewmain = true; break;
-			case OPTION(procs):       processmode = true; break;
+			case OPTION(procs):       processmode = true; 
+			                          /* Force old reduction style since newer one
+			                             passes local pointers to the master; array
+			                             reductions are, hence, precluded. */
+			                          oldReduction = true;
+			                          break;
 			case OPTION(threads):     threadmode = true; break;
 			case OPTION(nomp):        enableOpenMP = false; break;
 			case OPTION(nox):         enableOmpix = false; break;
-			case OPTION(nocodedup):   enableCodeDup = false; break;
+			case OPTION(taskopt0):    taskoptLevel = OPT_NONE; break;
+			case OPTION(taskopt1):    taskoptLevel = OPT_FAST; break;
+			case OPTION(taskopt2):    taskoptLevel = OPT_ULTRAFAST; break;
 			case OPTION(nolineno):    cppLineNo = false; break;
 			case OPTION(showdbginfo): showdbginfo = true; break;
+			case OPTION(drivecar):    analyzeKernels = true; break;
+			case OPTION(oldred):      oldReduction = true; break;
+			case OPTION(autoscope):   enableAutoscope = true; break;
 			case OPTION(usemod):
 				str_printf(modstr, ", \"%s\"", argv[i]+strlen(OPTNAME_L(usemod)) );
 				usedmods++;
@@ -199,20 +246,43 @@ int getopts(int argc, char *argv[])
 }
 
 
+static void reveal_inside_info()
+{
+		fprintf(stderr, ">> package = %s\n", PACKAGE_STRING);
+#ifdef PORTABLE_BUILD
+		fprintf(stderr, ">> this is a portable build\n");
+#endif
+#ifdef MODULES_CONFIG
+		fprintf(stderr, ">> configured modules: %s\n", MODULES_CONFIG);
+#endif
+		fprintf(stderr, ">> sizes of int, long, ptr: %d, %d, %d\n", 
+			SIZEOF_INT, SIZEOF_LONG, SIZEOF_CHAR_P);
+#ifdef TLS_KEYWORD
+		fprintf(stderr, ">> thread-local storage (TLS) is available\n");
+#else
+		fprintf(stderr, ">> thread-local storage (TLS) is not available.\n");
+#endif
+		fprintf(stderr, ">> _ompi __ompi__ <options>:\n");
+		showopts();
+}
+
+
 static
 int privatemode(int argc, char *argv[])
 {
-	enum { GV_STMT = 0, GV_EXPR, CODE_STMT, CODE_EXPR, CFG_SHOW,
-		     CFG_SHOW_VERBOSE, CG_SHOW, PRVCMD_LAST /* dummy */
+	enum { GV_STMT = 0, GV_EXPR, GV_PROG, CODE_STMT, CODE_EXPR, CFG_SHOW,
+		     CFG_SHOW_VERBOSE, CG_SHOW, SHOWINTS, PRVCMD_LAST /* dummy */
 	} cmd;
 	struct { char *name, *info; } privcmds[] = {
 		{ "gv_stmt",   "print statement node parse tree" },
 		{ "gv_expr",   "print expression node parse tree" },
+		{ "gv_prog",   "print the AST of a whole program" },
 		{ "code_stmt", "print C code for the tree" },
 		{ "code_expr", "print C code for the tree" },
 		{ "cfg",       "print the CFG for the tree" },
 		{ "cfgv",      "print the CFG for the tree with full details" },
 		{ "cg",        "print the call graph of a whole program" },
+		{ "showints",  "show various internal infos" },
 	};
 
 	char    tmp[256];
@@ -228,6 +298,8 @@ int privatemode(int argc, char *argv[])
 		        "where <command> is one of the following:\n", argv[0]);
 		for (cmd = 0; cmd < PRVCMD_LAST; cmd++)
 			fprintf(stderr, "%11s   %s\n", privcmds[cmd].name, privcmds[cmd].info);
+		fprintf(stderr, "[ If gv output is produced, use 'dot -Tpng' "
+		                "to make an image out of it. ]\n");
 		return (1);
 	}
 	filename = (argc > 3) ? argv[3] : NULL;
@@ -236,6 +308,11 @@ int privatemode(int argc, char *argv[])
 			break;
 	if (cmd == PRVCMD_LAST)
 		goto PRIVATEMODE_FAILURE;
+	if (cmd == SHOWINTS)
+	{
+		reveal_inside_info();
+		return (1);
+	}
 
 	stab = Symtab();                            /* Create the symbol table */
 	symtab_put(stab, Symbol("__builtin_va_list"), TYPENAME);
@@ -279,6 +356,11 @@ int privatemode(int argc, char *argv[])
 			if (expr != NULL)
 				ast_expr_gviz_doc(expr, A_str_string());
 			break;
+		case GV_PROG:
+			ast = parse_transunit_string(A_str_string());
+			if (ast != NULL)
+				ast_stmt_gviz_doc(ast, A_str_string());
+			break;
 		case CODE_STMT:
 			ast = parse_blocklist_string(A_str_string());
 			if (ast != NULL)
@@ -299,16 +381,12 @@ int privatemode(int argc, char *argv[])
 		case CFG_SHOW_VERBOSE:
 			ast = parse_blocklist_string(A_str_string());
 			if (ast != NULL)
-			{
-				//        if (ast->type == COMPOUND)
-				//          linearize(ast->body);
 				cfg_test(ast, (cmd == CFG_SHOW) ? 0 : 1);
-			}
 			break;
 		case CG_SHOW:
 			ast = parse_transunit_string(A_str_string());
 			if (ast != NULL)
-				call_graph_test(ast);
+				cg_call_graph_test(ast);
 			break;
 	}
 	return (0);
@@ -322,8 +400,9 @@ int main(int argc, char *argv[])
 {
 	time_t  now;
 	int     r, includes_omph;
-	bool    knowMemcpy, knowSize_t, knowMalloc; /* flag if def'ed in user code */
 	aststmt p;
+	        /* flag if def'ed in user code */
+	bool    knowMemcpy, knowMemset, knowSize_t;
 
 	/*
 	 * 1. Preparations
@@ -391,8 +470,8 @@ int main(int argc, char *argv[])
 	/* The parser has left the symbol table at global scope; we must drain it */
 	includes_omph = (symtab_get(stab, Symbol("omp_lock_t"), TYPENAME) != NULL);
 	knowMemcpy = (symtab_get(stab, Symbol("memcpy"), FUNCNAME) != NULL);
+	knowMemset = (symtab_get(stab, Symbol("memset"), FUNCNAME) != NULL);
 	knowSize_t = (symtab_get(stab, Symbol("size_t"), TYPENAME) != NULL);
-	knowMalloc = (symtab_get(stab, Symbol("malloc"), FUNCNAME) != NULL);
 	symtab_drain(stab);
 
 	if (hasMainfunc && (enableOpenMP || testingmode || processmode))
@@ -420,15 +499,19 @@ int main(int argc, char *argv[])
 			else
 			{
 				p = parse_and_declare_blocklist_string(
+				      "#pragma omp declare target\n"     /* Necessary since 4.0 */
 				      "typedef void *omp_nest_lock_t;"   /* The only stuff we needed */
 				      "typedef void *omp_lock_t; "       /* from <omp.h> */
 				      "typedef enum omp_sched_t { omp_sched_static = 1,"
 				      "omp_sched_dynamic = 2,omp_sched_guided = 3,omp_sched_auto = 4"
 				      " } omp_sched_t;"
+				      "\n#pragma omp end declare target\n"
 				      "int omp_in_parallel(void); "
 				      "int omp_get_thread_num(void); "
 				      "int omp_get_num_threads(void); "
-				      "int omp_in_final(void); "         /* 3.1 */
+				      "int omp_in_final(void); "
+				      "void *ort_memalloc(int size); "
+				      "void ort_memfree(void *ptr); "
 				    );
 				assert(p != NULL);
 				if (cppLineNo) p = BlockList(verbit("# 1 \"omp.mindefs\""), p);
@@ -457,6 +540,7 @@ int main(int argc, char *argv[])
 		ast_parentize(ast);    /* Parentize */
 		symtab_drain(stab);    /* Empty it; new globals will be traversed again */
 
+		cg_find_defined_funcs(ast);   /* Discover all defined functions first */
 		ast_xform(&ast);       /* The transformation phase */
 
 		time(&now);  /* Advertise us */
@@ -480,12 +564,23 @@ int main(int argc, char *argv[])
 			             "#endif"
 			            )
 			    );
+		if (needMemset && !knowMemset)
+			p = BlockList(
+			      p,
+			      verbit("#if _WIN64 || __amd64__ || __X86_64__\n"
+			             "   extern void *memset(void*,int,unsigned long int);\n"
+			             "#else\n"
+			             "   extern void *memset(void*,int,unsigned int);\n"
+			             "#endif"
+			            )
+			    );
 
 		ast = BlockList(p, ast);
 	}
 	append_new_main();
 
-	/* here would be a good place to call e.g. call_graph(); */
+	cg_find_defined_funcs(ast);   /* The AST is finalized; mark all functions */
+
 	ast_show(ast);
 
 	if (usedmods)             /* No need otherwise */

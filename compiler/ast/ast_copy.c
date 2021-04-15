@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_copy.c -- create a copy of an AST */
@@ -143,6 +143,17 @@ aststmt ast_stmt_labeled_copy(aststmt tree)
 }
 
 
+asmop ast_asmop_copy_almost(asmop op)
+{
+	if (!op)
+		return NULL;
+	return (AsmOp(ast_expr_copy(op->symbolicname),
+	              op->constraint ? strdup(op->constraint) : NULL,
+	              ast_expr_copy(op->var),
+	              op->op, op->next));
+}
+
+
 aststmt ast_stmt_copy_almost(aststmt tree)
 {
 	if (tree == NULL) return (NULL);
@@ -171,6 +182,14 @@ aststmt ast_stmt_copy_almost(aststmt tree)
 			                ast_decl_copy(tree->u.declaration.decl),
 			                ast_stmt_copy(tree->u.declaration.dlist),
 			                ast_stmt_copy(tree->body)));
+		case ASMSTMT:
+			return (AsmStmt(tree->subtype,
+			                ast_spec_copy(tree->u.assem->qualifiers),
+											strdup(tree->u.assem->template),
+											ast_asmop_copy(tree->u.assem->outs),
+											ast_asmop_copy(tree->u.assem->ins),
+											ast_expr_copy(tree->u.assem->clobbers),
+											ast_expr_copy(tree->u.assem->labels)));
 		case OMPSTMT:
 			return (OmpStmt(ast_ompcon_copy(tree->u.omp)));
 		case VERBATIM:
@@ -245,11 +264,14 @@ astspec ast_spec_copy_almost(astspec tree)
 			switch (tree->subtype)
 			{
 				case SPEC_enum:
-					return (Enumdecl(tree->name, ast_spec_copy(tree->body)));
+					return (Enumdecl(tree->name, 
+					                 ast_spec_copy(tree->body), 
+					                 ast_spec_copy(tree->sueattr)));
 				case SPEC_struct:
 				case SPEC_union:
 					return (SUdecl(tree->subtype,
-					               tree->name, ast_decl_copy(tree->u.decl)));
+					               tree->name, ast_decl_copy(tree->u.decl),
+					               ast_spec_copy(tree->sueattr)));
 				default:
 					fprintf(stderr, "[ast_spec_copy]: SUE b u g !!\n");
 					return (NULL);
@@ -260,6 +282,8 @@ astspec ast_spec_copy_almost(astspec tree)
 			return (Specifierlist(tree->subtype,
 			                      ast_spec_copy(tree->body),
 			                      ast_spec_copy(tree->u.next)));
+		case ATTRSPEC:
+			return (AttrSpec(tree->u.txt ? strdup(tree->u.txt) : NULL));
 		default:
 			fprintf(stderr, "[ast_spec_copy]: b u g !!\n");
 			return (NULL);
@@ -287,11 +311,14 @@ astspec ast_spec_copy_nosc_almost(astspec tree)
 			switch (tree->subtype)
 			{
 				case SPEC_enum:
-					return (Enumdecl(tree->name, ast_spec_copy(tree->body)));
+					return (Enumdecl(tree->name, 
+					                 ast_spec_copy(tree->body),
+					                 ast_spec_copy(tree->sueattr)));
 				case SPEC_struct:
 				case SPEC_union:
 					return (SUdecl(tree->subtype,
-					               tree->name, ast_decl_copy(tree->u.decl)));
+					               tree->name, ast_decl_copy(tree->u.decl),
+					               ast_spec_copy(tree->sueattr)));
 				default:
 					fprintf(stderr, "[ast_spec_copy]: SUE b u g !!\n");
 					return (NULL);
@@ -313,6 +340,8 @@ astspec ast_spec_copy_nosc_almost(astspec tree)
 				return (body);
 			return (next);
 		}
+		case ATTRSPEC:
+			return (AttrSpec(tree->u.txt ? strdup(tree->u.txt) : NULL));
 		default:
 			fprintf(stderr, "[ast_spec_copy]: b u g !!\n");
 			return (NULL);
@@ -367,27 +396,77 @@ astdecl ast_decl_copy_almost(astdecl tree)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
+static omparrdim ast_omparrdim_copy(omparrdim d)
+{
+	omparrdim new = NULL;
+	
+	if (d)
+	{
+		new = OmpArrDim(ast_expr_copy(d->lb), ast_expr_copy(d->len));
+		new->next = ast_omparrdim_copy(d->next);
+	}
+	return (new);
+}
+
+
+ompxli ast_ompxli_copy(ompxli xl)
+{
+	ompxli new = NULL;
+	
+	if (xl)
+	{
+		if (xl->xlitype == OXLI_IDENT)
+			new = PlainXLI(xl->id);
+		else
+			new = ArraySection(xl->id, ast_omparrdim_copy(xl->dim));
+		new->next = ast_ompxli_copy(xl->next);
+	}
+	return (new);
+}
+
+
 ompclause ast_ompclause_copy_almost(ompclause t)
 {
 	if (t == NULL) return (NULL);
 	switch (t->type)
 	{
 		case OCIF:
-			return (IfClause(ast_expr_copy(t->u.expr)));
+			return (IfClause(ast_expr_copy(t->u.expr), t->modifier) );
 		case OCFINAL:
 			return (FinalClause(ast_expr_copy(t->u.expr)));
 		case OCNUMTHREADS:
 			return (NumthreadsClause(ast_expr_copy(t->u.expr)));
+		case OCNUMTEAMS:
+			return (NumteamsClause(ast_expr_copy(t->u.expr)));
+		case OCTHREADLIMIT:
+			return (ThreadlimitClause(ast_expr_copy(t->u.expr)));
+		case OCHINT:
+			return (HintClause(ast_expr_copy(t->u.expr)));
+		case OCPRIORITY:
+			return (PriorityClause(ast_expr_copy(t->u.expr)));
 		case OCDEVICE:
 			return (DeviceClause(ast_expr_copy(t->u.expr)));
 		case OCSCHEDULE:
-			return (ScheduleClause(t->subtype, ast_expr_copy(t->u.expr)));
+			return (ScheduleClause(t->subtype,t->modifier,ast_expr_copy(t->u.expr)));
 		case OCDEFAULT:
 			return (DefaultClause(t->subtype));
 		case OCREDUCTION:
-			return (ReductionClause(t->subtype, ast_decl_copy(t->u.varlist)));
+			return (ReductionClause(t->subtype, ast_ompxli_copy(t->u.xlist)));
+		case OCDEPEND:
+			if (t->subtype == OC_sink)
+			{
+				ompclause c = DependClause(t->subtype, NULL);
+				c->u.expr = ast_expr_copy(t->u.expr);
+				return (c);
+			}
+			else
+				return (DependClause(t->subtype, ast_ompxli_copy(t->u.xlist)));
 		case OCMAP:
-			return (MapClause(t->subtype, ast_decl_copy(t->u.varlist)));
+			return (MapClause(t->subtype, t->modifier, ast_ompxli_copy(t->u.xlist)));
+		case OCTO:
+		case OCFROM:
+		case OCLINK:
+			return (UpdateClause(t->type, ast_ompxli_copy(t->u.xlist)));
 		case OCNOWAIT:
 		case OCORDERED:
 		case OCUNTIED:
@@ -396,6 +475,7 @@ ompclause ast_ompclause_copy_almost(ompclause t)
 		case OCSECTIONS:
 		case OCFOR:
 		case OCTASKGROUP:
+		case OCDEFAULTMAP:
 			return (PlainClause(t->type));
 		case OCCOPYIN:
 		case OCPRIVATE:
@@ -403,15 +483,17 @@ ompclause ast_ompclause_copy_almost(ompclause t)
 		case OCFIRSTPRIVATE:
 		case OCLASTPRIVATE:
 		case OCSHARED:
+		case OCISDEVPTR:
+		case OCUSEDEVPTR:
 		case OCAUTO:
-		case OCTO:
-		case OCFROM:
 			return (VarlistClause(t->type, ast_decl_copy(t->u.varlist)));
 		case OCLIST:
 			return (OmpClauseList(ast_ompclause_copy(t->u.list.next),
 			                      ast_ompclause_copy(t->u.list.elem)));
 		case OCCOLLAPSE:
 			return (CollapseClause(t->subtype));
+		case OCORDEREDNUM:
+			return (OrderedNumClause(t->subtype));
 		case OCPROCBIND:
 			return (ProcBindClause(t->subtype));
 		default:
@@ -427,7 +509,7 @@ ompdir ast_ompdir_copy_almost(ompdir t)
 	switch (t->type)
 	{
 		case DCCRITICAL:
-			return (OmpCriticalDirective(t->u.region));
+			return (OmpCriticalDirective(t->u.region,ast_ompclause_copy(t->clauses)));
 		case DCFLUSH:
 			return (OmpFlushDirective(ast_decl_copy(t->u.varlist)));
 		default:
@@ -439,9 +521,9 @@ ompdir ast_ompdir_copy_almost(ompdir t)
 ompcon ast_ompcon_copy_almost(ompcon t)
 {
 	if (t == NULL) return (NULL);
-	return (OmpConstruct(t->type,
-	                     ast_ompdir_copy(t->directive),
-	                     ast_stmt_copy(t->body)));
+	return ( OmpConstruct(t->type,  /* v45 #declare target may NOT have a body */
+	                      ast_ompdir_copy(t->directive),
+	                      ast_stmt_copy(t->body)) );
 }
 
 
@@ -453,6 +535,13 @@ astexpr ast_expr_copy(astexpr tree)
 {
 	astexpr t = ast_expr_copy_almost(tree);
 	CopyPosInfo(t, tree);
+	return (t);
+}
+
+
+asmop ast_asmop_copy(asmop tree)
+{
+	asmop t = ast_asmop_copy_almost(tree);
 	return (t);
 }
 
@@ -544,6 +633,8 @@ oxclause ast_oxclause_copy_almost(oxclause t)
 		case OX_OCTIED:
 		case OX_OCUNTIED:
 		case OX_OCDETACHED:
+		case OX_OCLOCAL:
+		case OX_OCREMOTE:
 			return (OmpixPlainClause(t->type));
 		case OX_OCIN:
 		case OX_OCOUT:
@@ -553,6 +644,12 @@ oxclause ast_oxclause_copy_almost(oxclause t)
 			return (OmpixReductionClause(t->operator, ast_decl_copy(t->u.varlist)));
 		case OX_OCATNODE:
 			return (OmpixAtnodeClause(t->u.expr));
+		case OX_OCATWORKER:
+			return (OmpixAtworkerClause(t->u.expr));
+		case OX_OCIF:
+			return (OmpixIfClause(t->u.expr));
+		case OX_OCHINTS:
+			return (OmpixHintsClause(t->u.expr));
 		case OX_OCLIST:
 			return (OmpixClauseList(ast_oxclause_copy(t->u.list.next),
 			                        ast_oxclause_copy(t->u.list.elem)));

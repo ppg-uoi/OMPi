@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* symtab.c -- the symbol table machinery */
@@ -201,9 +201,12 @@ stentry Stentry(symbol s, namespace sp, stentry bnext, stentry top)
 	e->key        = s;
 	e->vval       = 0;
 	e->ival       = 0;
+	e->mval       = 0;
+	e->pval       = NULL;
 	e->spec       = NULL;
 	e->decl       = NULL;
 	e->idecl      = NULL;
+	e->funcdef    = NULL;
 	e->space      = sp;
 	e->isarray    = false;
 	e->isthrpriv  = false;

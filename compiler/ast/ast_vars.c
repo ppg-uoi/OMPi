@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_vars.c -- declarations and analyses of variables in the AST.
@@ -75,6 +75,8 @@
 #include "x_clauses.h"
 #include "ompi.h"
 #include "set.h"
+#include "x_target.h"
+#include "x_decltarg.h"
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -84,7 +86,9 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
-/* Declare all variables appearing in a declaration list; could also be types */
+/* Declare all variables appearing in a declaration list; could also be 
+ * functions or types 
+ */
 void ast_declare_decllist_vars(astspec s, astdecl d)
 {
 	astdecl ini = NULL;
@@ -122,13 +126,17 @@ void ast_declare_decllist_vars(astspec s, astdecl d)
 		e->idecl     = ini;
 		e->isarray   = (kind == DARRAY);
 		e->isthrpriv = false;
+		
+		/* Check globals for #declare target */
+		if (e->scopelevel == 0 && e->space != TYPENAME)
+			if (decltarg_id_isknown(t))
+				decltarg_bind_id(e);
 	}
 }
 
 
 /* Declare all variables in a varlist (i.e. in an OpenMP data clause) */
-void ast_declare_varlist_vars(astdecl d, enum clausetype type,
-                              enum clausesubt subtype)
+void ast_declare_varlist_vars(astdecl d, ompclt_e type, ompclsubt_e subtype)
 {
 	stentry e, orig;
 
@@ -146,22 +154,6 @@ void ast_declare_varlist_vars(astdecl d, enum clausetype type,
 		           "unknown identifier `%s'\n",
 		           d->file->name, d->l, d->u.id->name);
 
-	/* Arrays may not appear in a reduction clause. (OpenMP4.0.0.pdf:171:8) */
-	if (type == OCREDUCTION && orig->isarray)
-		exit_error(1, "(%s, line %d) openmp error:\n\t"
-		           "reduction variable `%s' is non-scalar.\n",
-		           d->file->name, d->l, d->u.id->name);
-
-	/* Issue an error if variable is threadprivate (OpenMP4.0.0.pdf:179:13) */
-	if (type == OCMAP && orig->isthrpriv)
-		exit_error(1, "(%s, line %d) openmp error:\n\t"
-		           "Threadprivate variable \"%s\" cannot appear in map clause\n",
-		           d->file->name, d->l, d->u.id->name);
-
-	/* Ignore variables in map clause that have appeared in a declare directive*/
-	if (type == OCMAP && orig->isindevenv == 1)
-		return;
-
 	e = symtab_put(stab, d->u.id, IDNAME);  /* Declare new local var */
 	e->decl      = orig->decl;                       /* Keep all infos */
 	e->idecl     = orig->idecl;
@@ -171,10 +163,52 @@ void ast_declare_varlist_vars(astdecl d, enum clausetype type,
 
 	e->ival      = type; /* Mark */
 	e->vval      = subtype;
+}
 
-	/* Mark variables appearing in target data directive */
-	if (type == OCMAP && target_data_scope + 1 == e->scopelevel)
-		e->isindevenv = 2;
+
+/**
+ * Declare all variables in an OpenMP extended list (REDUCTION/MAP) clause
+ * @param t the clause
+ */
+void ast_declare_xlist_vars(ompclause t)
+{
+	stentry e, orig;
+	ompxli  xl = t->u.xlist;
+
+	for (; xl; xl = xl->next)
+	{
+		/* The identifier should be known! */
+		if ((orig = symtab_get(stab, xl->id, IDNAME)) == NULL)
+			exit_error(1, "(%s, line %d) openmp error:\n\t"
+								"unknown identifier `%s'\n",
+								xl->file->name, xl->l, xl->id->name);
+
+		/* Issue an error if variable is threadprivate (OpenMP4.0.0.pdf:179:13) */
+		if (t->type == OCMAP && orig->isthrpriv)
+			exit_error(1, "(%s, line %d) openmp error:\n\t"
+								"Threadprivate variable \"%s\" cannot appear in map clause\n",
+								xl->file->name, xl->l, xl->id->name);
+
+		/* Ignore all declare-target vars */
+		if (t->type == OCMAP && orig->isindevenv == due2DECLTARG)
+				continue;
+
+		e = symtab_put(stab, xl->id, IDNAME);   /* Declare new local var */
+		e->decl      = orig->decl;                     /* Keep all infos */
+		e->idecl     = orig->idecl;
+		e->spec      = orig->spec;
+		e->isarray   = orig->isarray;
+		e->isthrpriv = orig->isthrpriv;
+
+		e->ival      = t->type; /* Mark */
+		e->vval      = t->subtype;
+		e->mval      = t->modifier;
+		e->pval      = xl;                      /* Use pval to remember! */
+
+		/* Check if this is due to a target data directive and mark */
+		if (t->type == OCMAP &&  e->scopelevel == target_data_scope + 1)
+			e->isindevenv = due2TARGDATA;
+	}
 }
 
 
@@ -231,6 +265,7 @@ void ast_declare_function_params(astdecl d)
 
 static travopts_t *vartrops;
 
+
 static void vars_compound(aststmt t, void *ignore, int vistime)
 {
 	if (vistime == PREVISIT)
@@ -241,12 +276,14 @@ static void vars_compound(aststmt t, void *ignore, int vistime)
 			scope_end(stab);
 }
 
+
 static void vars_declaration(aststmt t, void *ignore, int vistime)
 {
 	if (vistime == POSTVISIT) /* MIDVISIT */
 		if (t->u.declaration.decl)
 			ast_declare_decllist_vars(t->u.declaration.spec, t->u.declaration.decl);
 }
+
 
 static void vars_funcdef(aststmt t, void *ignore, int vistime)
 {
@@ -260,11 +297,13 @@ static void vars_funcdef(aststmt t, void *ignore, int vistime)
 		scope_end(stab);
 }
 
+
 static void vars_ident(astexpr t, void *f, int vistime)
 {
 	if (vistime == PREVISIT)
 		(*((void (*)(astexpr)) f))(t);
 }
+
 
 static void vars_ompclvars(ompclause t, void *ignore, int vistime)
 {
@@ -275,13 +314,18 @@ static void vars_ompclvars(ompclause t, void *ignore, int vistime)
 			case OCFIRSTPRIVATE:
 			case OCSHARED:
 			case OCCOPYIN:
-			case OCREDUCTION:
-			case OCMAP:
+			case OCISDEVPTR:
+			case OCUSEDEVPTR:
 			case OCAUTO:
 				ast_declare_varlist_vars(t->u.varlist, t->type, t->subtype);
 				break;
+			case OCREDUCTION:
+			case OCMAP:
+				ast_declare_xlist_vars(t);
+				break;
 		};
 }
+
 
 static void vars_ompconall(ompcon t, void *ignore, int vistime)
 {
@@ -290,6 +334,7 @@ static void vars_ompconall(ompcon t, void *ignore, int vistime)
 	if (vistime == POSTVISIT)
 		scope_end(stab);
 }
+
 
 static void vars_oxconall(oxcon t, void *ignore, int vistime)
 {
@@ -322,12 +367,55 @@ void ast_stmt_vars(aststmt t, void (*idh)(astexpr))
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                               *
+ *     UTILITY FUNCTIONS                                         *
+ *                                                               *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+/** 
+ * Take a varlist and put all its variables in a set.
+ * @param d the varlist
+ * @param s the set (must be initialized)
+ */
+void ast_varlist2set(astdecl d, set(vars) s)
+{
+	if (d->type == DLIST && d->subtype == DECL_idlist)
+	{
+		ast_varlist2set(d->u.next, s);
+		d = d->decl;
+	}
+	assert(d->type == DIDENT);
+	set_put_unique(s, d->u.id);
+}
+
+
+/** 
+ * Take a set of variables and create a varlist out of it.
+ * @param s the set
+ * @param d the varlist
+ */
+astdecl ast_set2varlist(set(vars) s)
+{
+	setelem(vars) v = s->first; /* Assumes >= 1 elems */
+	astdecl       list = v ? IdentifierDecl(v->key) : NULL;
+	
+	for (v = v->next; v; v = v->next)
+		list = IdList(list, IdentifierDecl(v->key));
+	return (list);
+}
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *                                                               *
  *     ANALYZE VARIABLES USAGE                                   *
  *                                                               *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+
 /* A set used in analyze functions */
 SET_TYPE_IMPLEMENT(vars)
+/* A set used in functions analyzing extended list items (array sections) */
+SET_TYPE_IMPLEMENT(xlitems)
 
 /* Used by analyze_pointerize_vars and analyze_used_vars*/
 static int thislevel;
@@ -365,8 +453,9 @@ void idh_sgl_makeptr(astexpr t)
 
 	if (e && issgl(e) && !isextern(e))
 	{
-		astexpr sub = Parenthesis(UnaryOperator(UOP_star, Identifier(t->u.sym)));
+		astexpr sub = Parenthesis(Deref(Identifier(t->u.sym)));
 		*t = *sub;
+		free(sub);
 	}
 }
 
@@ -387,7 +476,11 @@ void idh_makeptr(astexpr t)
 {
 	stentry e = symtab_get(stab, t->u.sym, IDNAME);
 	if (e && e->scopelevel <= thislevel && set_get(ptrvars, t->u.sym))
-		*t = *Parenthesis(UnaryOperator(UOP_star, Identifier(t->u.sym)));
+	{
+		astexpr sub = Parenthesis(Deref(Identifier(t->u.sym)));
+		*t = *sub;
+		free(sub);
+	}
 }
 
 /**
@@ -404,21 +497,55 @@ void analyze_pointerize_vars(aststmt t, set(vars) vars)
 }
 
 
+static char *_renameprefix, _renamebuf[256];
 static
-void idh_makedeclptr(astexpr t)
+void idh_rename(astexpr t)
+{
+	stentry e = symtab_get(stab, t->u.sym, IDNAME);
+	if (e && e->scopelevel <= thislevel && set_get(ptrvars, t->u.sym))
+	{
+		astexpr sub;
+		snprintf(_renamebuf, 255, "%s%s", _renameprefix, t->u.sym->name);
+		sub = IdentName(_renamebuf);
+		*t = *sub;
+		free(sub);
+	}
+}
+
+
+/**
+ * Renames all variables listed in the given set and turns them into pointers
+ *
+ * @param t     The statement containing variables that we want to pointerize
+ * @param vars  The variables to turn into pointers
+ * @param pefix The prefix used to produce the new name
+ */
+void analyze_rename_vars(aststmt t, set(vars) vars, char *prefix)
+{
+	ptrvars = vars;
+	thislevel = stab->scopelevel;
+	_renameprefix = prefix;
+	ast_stmt_vars(t, idh_rename);
+}
+
+
+static
+void idh_makedeclptr(astexpr t, bool dofuncs)
 {
 	stentry e = symtab_get(stab, t->u.sym, IDNAME);
 
 	if (!e)
 	{
-		/* Check if it is a function and is in a declare target */
-		e = symtab_get(stab, t->u.sym, FUNCNAME);
-		if (e && !e->isindevenv)
-			exit_error(1, "(%s, line %d) openmp error:\n\t"
-			           "Function \"%s\" needs to be declared in a \"declare "
-			           "target\" directive.\n",
-			           t->file->name, t->l, t->u.sym->name);
-
+		if (dofuncs)  /* Check if it is a function and is in a declare target */
+		{
+			e = symtab_get(stab, t->u.sym, FUNCNAME);
+			if (e && !e->isindevenv)
+			{
+				/* Since OpenMP V5.0, such functions are assumed #declare'd */
+				decltarg_add_calledfunc(t->u.sym);
+				decltarg_bind_id(e);
+			}
+		}
 		return;
 	}
 
@@ -434,20 +561,53 @@ void idh_makedeclptr(astexpr t)
 		           t->file->name, t->l, t->u.sym->name);
 
 	//TODO test
-	if (e->isindevenv == 2)
-		exit_error(1, "analyze_pointerize_declared_vars %s:%d\n", __FILE__, __LINE__);
+	if (e->isindevenv == due2TARGDATA)  /* should not come from a target data! */
+		exit_error(1, "analyze_pointerize_declared_vars %s:%d\n",__FILE__,__LINE__);
 
-	*t = *Parenthesis(UnaryOperator(UOP_star, Identifier(t->u.sym)));
+	//TODO: Do we need to change e->decl ???
+	*t = *Parenthesis(Deref(Identifier(t->u.sym)));
 }
 
-/**
- * Turns global into pointers making sure they appeared in declare target
- *
- * @param t    The statement containing variables that we want to pointerize
- */
-void analyze_pointerize_declared_vars(aststmt t)
+
+static
+void idh_makedeclptr_funcstoo(astexpr t)
 {
-	ast_stmt_vars(t, idh_makedeclptr);
+	idh_makedeclptr(t, true);
+}
+
+
+static
+void idh_makedeclptr_funcsnot(astexpr t)
+{
+	idh_makedeclptr(t, false);
+}
+
+
+/**
+ * Turns globals into pointers making sure they appeared in declare target.
+ * This is called from produce_target_files() when transforming kernels and 
+ * the functions that where #declare'd. Also declares/binds function symbols.
+ * Thus, it is called AFTER all other transformations have completed.
+ *
+ * @param t  The statement containing variables that we want to pointerize
+ */
+void analyze_pointerize_decltarg_varsfuncs(aststmt t)
+{
+	ast_stmt_vars(t, idh_makedeclptr_funcstoo);
+}
+
+
+/**
+ * Turns globals into pointers making sure they appeared in declare target.
+ * This is called from produce_target_files() when transforming kernels and 
+ * the functions that where #declare'd.
+ * Thus, it is called AFTER all other transformations have completed.
+ *
+ * @param t  The statement containing variables that we want to pointerize
+ */
+void analyze_pointerize_decltarg_varsonly(aststmt t)
+{
+	ast_stmt_vars(t, idh_makedeclptr_funcsnot);
 }
 
 
@@ -467,31 +627,34 @@ vartype_t OC2DCT(stentry e)
 		case OCREDUCTION:
 			return DCT_REDUCTION;
 		case OCMAP:
-			if (e->isindevenv == 1) //Ignore declared variables
-				return DCT_IGNORE;
-
+			if (e->isindevenv == due2DECLTARG)
+				return DCT_IGNORE;     /* Ignore all declare-target variables */
 			switch (e->vval)
 			{
 				case OC_alloc:
-					return DCT_PRIVATE;
+					return DCT_MAPALLOC;
 				case OC_to:
-					return DCT_BYVALUE;
+					return DCT_MAPTO;
 				case OC_from:
-					return DCT_BYRESULT;
+					return DCT_MAPFROM;
 				case OC_tofrom:
-					return DCT_BYVALRES;
+					return DCT_MAPTOFROM;
 				default:
 					fprintf(stderr, "OC2DCT map type %s\n", clausesubs[e->vval]);
 					exit(1);
 			}
+		case OCISDEVPTR:
+			return DCT_BYVALUE; /* treat as firstprivate for now; no arrays allowed */
+		case OCUSEDEVPTR:
+			return DCT_BYREF;   /* fake shared; only for #target data */
 		case OCAUTO:
 			return DCT_UNSPECIFIED;
 		default:
-			fprintf(stderr, "ast_vars.c:idh_usevar:Clause type of \"%s\" is %s[%d]\n",
-			        e->key->name, clausenames[e->ival], e->ival);
-			exit(1);
+			exit_error(1, "ast_vars.c:idh_usevar:Clause type of \"%s\" is %s[%d]\n",
+			           e->key->name, clausenames[e->ival], e->ival);
 	}
 }
+
 
 static
 void idh_usevar(astexpr t)
@@ -501,37 +664,50 @@ void idh_usevar(astexpr t)
 
 	if (!e)
 		return;
-
 	/* Check if the variable was in a clause. +1 is for the scope that we open in
 	 * the OpenMP directive
 	 */
 	if (e->scopelevel == thislevel + 1)
 	{
 		s = set_put_unique(usedvars[OC2DCT(e)], t->u.sym);
-		/* We treat copyin variables just like thread privates (as byref) but we
-		 * also mark them using ival to write the required code in x_parallel.
-		 * We treat auto variables as unspecified and mark that they are auto.
-		 */
-		if (e->ival == OCCOPYIN || e->ival == OCAUTO)
-			s->value = e->ival;
-		else
-			/* For reduction we also need the reduction type which is in vval*/
-			if (e->ival == OCREDUCTION)
-				s->value = e->vval;
-
+		switch (s->value.clause = e->ival)
+		{
+			case OCCOPYIN:
+			case OCAUTO:
+				/* We treat copyin variables just like thread privates (as byref) but we
+				 * also mark them using ival to write the required code in x_parallel.
+				 * We treat auto variables as unspecified and mark that they are auto.
+				 */
+				break;
+			case OCREDUCTION: 
+				s->value.ptr    = e->pval;  /* remember the xlitem node */
+				s->value.clsubt = e->vval;  /* vval holds the reduction type */
+				break;
+			case OCMAP:
+				s->value.ptr    = e->pval;  /* remember the xlitem node */
+				s->value.clmod  = e->mval;  /* remember the modifier */ 
+				break;
+		}
 	}
-	/* Else if the variable was declared in a previous block we put it in the
-	 * unspecified set. They are later moved in the other sets by outline using
-	 * the implicitDefault() function.
-	 */
 	else
+		/* Else, if the variable was declared in a previous block we put it in the
+		 * unspecified set (implicit). They are later moved to the other sets by 
+		 * outline, using the implicitDefault() function. 
+		 *   -- or they are ignored when not outlining (e.g. target data) (VVD)
+		 */
 		if (e->scopelevel <= thislevel)
-			set_put_unique(usedvars[DCT_UNSPECIFIED], t->u.sym)->value = e->ival;
+		{
+			s = set_put_unique(usedvars[DCT_UNSPECIFIED], t->u.sym);
+			s->value.ptr    = e->pval;
+			s->value.clause = OCNOCLAUSE;
+			s->value.clsubt = OC_DontCare;
+			s->value.clmod  = OCM_none;
+		}
 }
 
 /**
  * Returns a set with all variables (which were defined in a previous scope)
- * that appear inside a statement
+ * that appear inside a statement. Used by outline and xform_targetdata.
  *
  * @param t The statement to search
  * @return  A set with all the variables found

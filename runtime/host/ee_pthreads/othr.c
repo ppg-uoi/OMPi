@@ -17,10 +17,16 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-/*
+/* Jan, 2020
+ *   New env variable OMPI_PTHREADS_MAXTHR to set a total maximum number
+ *   of running threads. We needed this since thread_limit is now a
+ *   per-league limit, not an overall limit.
+ * Mar. 2019
+ *   New env variable OMPI_PTHREADS_POLICY to select thread handling,
+ *   i.e. whether to use a (possibly pre-created) thread pool or not.
  * Nov. 2010
  *   Nested locks now owned by tasks (OpenMP3.0)
  * Jun. 2010
@@ -39,15 +45,35 @@
 
 /*
  * An implementation of the othr API using plain & portable POSIX threads.
- * A simple, thread library for multilevel parallelism.
+ * A simple, thread library for (probably inefficient) multilevel parallelism.
+ *
+ * There are two operating modes: threadjoin or pool [variable "keepthreads"].
+ * In the first case, threads die when the team terminates.
+ * In the second case, threads join a pool and get re-used in subsequent teams.
+ * The pool can be pre-created in the beggining or not. In addition, when ORT
+ * requests threads and the pool has not enough to supply, it is selectable
+ * whether new threads will be created (certainly causing oversubscription) or
+ * only the existing ones will be employed.
+ *
+ * Check the environmental variable OMPI_PTHREADS_POLICY.
+ *
  * It uses pure PTHREADS and a pool of threads, endlessly spinning for work.
  * The pool is of fixed size.
  */
 
 #include "config.h"
 
-#if defined(CAN_BIND) && (defined(__SYSCOMPILER_gcc) || defined(__SYSCOMPILER_intel))
+#if defined(HAVE_PTHREAD_AFFINITY) && (defined(__SYSCOMPILER_gcc) || \
+                   defined(__SYSCOMPILER_intel) || defined(__SYSCOMPILER_mpicc))
 	#define _GNU_SOURCE
+#endif
+
+#if defined(HAVE_GETTID)
+	#include <sys/types.h>
+#elif defined(HAVE_GETTID_SYSCALL)
+	#define _GNU_SOURCE
+	#include <unistd.h>
+	#include <sys/syscall.h>
 #endif
 
 #include "../ort.h"
@@ -56,10 +82,10 @@
 #include "ee.h"
 
 #if defined(__SYSCOMPILER_sun)
-	#undef CAN_BIND   /* Problem with CPU_SET */
+	#undef HAVE_PTHREAD_AFFINITY   /* Problem with CPU_SET */
 #endif
 
-#ifdef CAN_BIND
+#ifdef HAVE_PTHREAD_AFFINITY
 	#include <sched.h>
 #endif
 
@@ -71,7 +97,7 @@
 	#include <unistd.h>
 #endif
 
-
+/* Yield timeouts */
 #define WORKER_YIELD 50
 #define MASTER_YIELD 1000
 #define WAIT_WHILE(f, trials) { \
@@ -83,130 +109,306 @@
 			}; \
 	}
 
-#define PERM   0
-#define TEMP   1
-/* Types & declarations
- */
+/* Threshold beyond thrinfo_t arrays are reduced */
+#define ALLOC_THRESHOLD    16
 
+/* Thread types:
+ * a) FORKJOIN threads are used if the user does not want a pool;
+ *    every created team is destroyed at the end of the parallel region.
+ *    That is, forkjoin threads die; and they become joinable.
+ * b) PERSISTENT threads never die; when done, they enter a pool of threads
+ *    ready to be utilized in subsequent parallel regions.
+ * c) TRANSIENT threads function like forkjoin threads but are only used
+ *    when persistent threading is in effect. They are created only when
+ *    the creation of more persistent threads is about to cause
+ *    oversubscription of the processors; they are created just to execute
+ *    the particular parallel regiona and then they die. In contrast to
+ *    forkjoin threads, they are not joinable.
+ * By default, we use peristent threading (which utilizes transient threads
+ * whenever needed). To enforce forkjoin threading, one must set
+ * OMPI_PTHREADS_POLICY to "kill".
+ */
+#define PERSISTENT 0
+#define TRANSIENT  1
+#define FORKJOIN   2
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *                                                                 *
+ *  TYPES, GLOBALS, UTILITIES                                      *
+ *                                                                 *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+/* TODO: check padding (it shows as 128 bytes but you never know) */
 typedef struct othr_pool_s
 {
 	void *arg;                    /* Argument for the thread function */
 	void *info;
-	struct  othr_pool_s *next;    /* Next node into the list */
-	volatile int spin;            /* Spin here waiting for work */
 	int id;                       /* A sequential id given by OMPI */
 	int type;
+	struct  othr_pool_s *next;    /* Next node into the list */
+	volatile short  wait;         /* Block/spin here waiting for work */
+	pthread_cond_t  wait_cond;    /* For passive policy */
+	pthread_mutex_t wait_mut;
+
 #ifdef __SYSOS_solaris
 	int creation_id;
-	char pad[24];
-#else
-	char pad[28];
 #endif
-} othr_pool_t;
+} thrpool_t;
 
 typedef struct
 {
 	int level;
-	volatile int *running;         /* # running threads in a team */
-	othr_pool_t  **tp;
-	int team;
-} othr_info;
+	volatile int *running;                /* # running threads in a team */
+	pthread_t  *tids;              /* the thread ids of FORKJOIN threads */
+	thrpool_t  **tp;
+	pthread_t *actual_run_ptr;   /* Pointer returned by calloc, realloc. */
+	thrpool_t *actual_tid_ptr;   /* Pointer returned by calloc, realloc. */
+	int teamsize;
+	int alloc_size;
+} thrinfo_t;
 
 static int          pthread_lib_inited = 0;  /* To avoid re-initializations */
-static othr_pool_t  *H = NULL;                  /* Pool = a list of threads */
+static int          keepthreads = true;      /* Retired threads form a pool */
+static thrpool_t    *H = NULL;                  /* Pool = a list of threads */
 static volatile int plen;                          /* # threads in the pool */
-static othr_lock_t  plock;                  /* A lock for accesing the pool */
+static othr_lock_t  plock;                 /* A lock for accessing the pool */
 
 /* OpenMP 3.0/3.1 stuff */
-static int             threadlimit, threadscreated, proc_bind;
+static int            threadlimit, threadsalive, proc_bind, waitpolicy;
+static int            throttling;  /* Oversubscription threshold */
 static ort_icvs_t     *ompi_icv; /* OpenMP 3.0 - User can change some values */
 static pthread_attr_t *globalattr = NULL;      /* For stacksize */
 
-/* Binding info */
-static volatile int bind_first_cpu = 0, bind_next_cpu = 0, bind_cpu_limit;
+#ifdef HAVE_PTHREAD_AFFINITY
 
-/* A list of blocked threads */
+/* Binding info */
+static volatile int bind_first_cpu = -1, bind_next_cpu = 0, bind_cpu_limit;
+static int *cpus_onln;
+
+/**
+ * Allocates and initializes array 'cpus_onln', returns array size (# of cpus)
+ * and the index of the cpu the initial thread executes on (passed by reference)
+ */
 static
-othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail, int thread_type)
+int init_cpus_onln(cpu_set_t *set, volatile int *first_cpu)
 {
-	pthread_t   thr;
-	volatile othr_pool_t *first_node, *node, *prev_node;
-	int         i, e;
-	void        *threadjob(void *);
-	void        *threadjob_and_exit(void *);
-	int         NP = ort_get_num_procs();
+	int i, ncpus, first_cpu_index;
+
+	cpus_onln = (int *) ort_alloc(sizeof(int) * CPU_COUNT(set));
+	for (i = ncpus = 0; i < CPU_SETSIZE; i++)
+		if (CPU_ISSET(i, set))
+		{
+			if (*first_cpu == i)
+				first_cpu_index = ncpus;
+			cpus_onln[ncpus++] = i;
+		};
+	*first_cpu = first_cpu_index;
+	return ncpus;
+}
+
+#endif /* HAVE_PTHREAD_AFFINITY */
+
+
+/* The function executed by persistent threads
+ */
+void *persistent_thread(void *env)
+{
+	volatile thrinfo_t *myinfo;
+	volatile thrpool_t *env_t = (thrpool_t *) env;
+
+#ifdef __SYSOS_solaris
+	if (env_t->creation_id != -1)
+		processor_bind(P_LWPID, env_t->creation_id, env_t->creation_id - 1, NULL);
+#endif
+
+	for (;;)
+	{
+		/* Wait for work */
+		if (waitpolicy == _OMP_ACTIVE)
+		{
+			WAIT_WHILE(env_t->wait, WORKER_YIELD);
+			env_t->wait = 1;                      /* Prepare me for next round */
+		}
+		else
+		{
+			pthread_mutex_lock((pthread_mutex_t *) &env_t->wait_mut);
+			while (env_t->wait != 0)
+				pthread_cond_wait((pthread_cond_t *) &env_t->wait_cond,
+				                  (pthread_mutex_t *) &env_t->wait_mut);
+			env_t->wait = 1;
+			pthread_mutex_unlock((pthread_mutex_t *) &env_t->wait_mut);
+		}
+
+		ort_ee_dowork(env_t->id, env_t->arg); /* Execute requested code */
+
+		myinfo = env_t->info;                 /* Moved this up - thanks to M-CC */
+		myinfo->running[env_t->id] = 0;       /* Notify my parent I'm done */
+	}
+}
+
+
+/* The function executed by transient threads
+ * (the same as the persistent threads, without the infinite loop).
+ */
+void *transient_thread(void *env)
+{
+	volatile thrinfo_t *myinfo;
+	volatile thrpool_t *env_t = (thrpool_t *) env;
+
+#ifdef __SYSOS_solaris
+	if (env_t->creation_id != -1)
+		processor_bind(P_LWPID, env_t->creation_id, env_t->creation_id - 1, NULL);
+#endif
+
+	/* Wait for work */
+	if (waitpolicy == _OMP_ACTIVE)
+	{
+		WAIT_WHILE(env_t->wait, WORKER_YIELD);
+		env_t->wait = 1;       /* Not needed for transient threads */
+	}
+	else
+	{
+		pthread_mutex_lock((pthread_mutex_t *) &env_t->wait_mut);
+		while (env_t->wait != 0)
+			pthread_cond_wait((pthread_cond_t *) &env_t->wait_cond,
+			                  (pthread_mutex_t *) &env_t->wait_mut);
+		env_t->wait = 1;
+		pthread_mutex_unlock((pthread_mutex_t *)&env_t->wait_mut);
+	}
+
+	ort_ee_dowork(env_t->id, env_t->arg); /* Execute requested code */
+
+	myinfo = env_t->info;                 /* Moved this up - thanks to M-CC */
+	myinfo->running[env_t->id] = 0;       /* Notify my parent I'm done */
+
+	ort_ee_cleanup();                     /* Cleanup (necessary!) */
+	return NULL;
+}
+
+
+/* The function executed by forkjoin threads
+ */
+void *forkjoin_thread(void *env)
+{
+	volatile thrpool_t *env_t = (thrpool_t *) env;
+
+#ifdef __SYSOS_solaris
+	if (env_t->creation_id != -1)
+		processor_bind(P_LWPID, env_t->creation_id, env_t->creation_id - 1, NULL);
+#endif
+
+	ort_ee_dowork(env_t->id, env_t->arg);    /* Execute requested code */
+	ort_ee_cleanup();                        /* Cleanup (necessary!) */
+	return NULL;
+}
+
+
+/**
+ * Create a number of possibly blocked, possibly bound threads.
+ * @param n       the number of threads to create
+ * @param thrtype the type of threads (PERSISTENT, TRANSIENT, FORKJOIN)
+ * @param tail    the pool of threads to join (PERSISTENT & TRANSIENT threads)
+ *                the argument to give to each thread (FORKJOIN threads)
+ * @return        the new head of the pool (n/a in FORKJOIN threads)
+ */
+static
+thrpool_t *_new_bunch_of_threads(int n, int thrtype, thrpool_t **tail)
+{
+	pthread_t thr, *thrids;
+	volatile thrpool_t *first_node, *node, *prev_node;
+	int         i, e, NPC;
+	static int  NP;
 	pthread_attr_t localattr;
 
 #ifdef __SYSOS_solaris
 	static int created_threads = 0;
 #endif
 
-#ifdef CAN_BIND
-	int local_next_cpu;
-	cpu_set_t   cpuset;
+#ifdef HAVE_PTHREAD_AFFINITY
+	int        j, local_next_cpu;
+	cpu_set_t  cpuset, *cpusetptr;
 	static cpu_set_t fullset;
-	int j;
+	static int gotaffinity = 1; /* Whether pthread_getaffinity_np succeeded */
+	// TODO move bind_first_cpu declaration here
 
-	if (proc_bind)
+	if (proc_bind && H == NULL) /* 1st call from initial thread; find its cpu */
 	{
-		if (H == NULL)  /* first time called by initial thread; find its cpu. */
+		if (globalattr == NULL)   /* In case the user didn't set the stacksize */
 		{
-			if (globalattr == NULL) /* In case user didn't set the stacksize */
-			{
-				globalattr = (pthread_attr_t *)malloc(sizeof(pthread_attr_t));
-				pthread_attr_init(globalattr);
-			}
+			globalattr = (pthread_attr_t *) malloc(sizeof(pthread_attr_t));
+			pthread_attr_init(globalattr);
+		}
 
-			if (NP > 8 * sizeof(cpuset)) NP = 8 * sizeof(cpuset); /* just in case */
-			if ((bind_first_cpu = sched_getcpu()) < 0)
-				bind_first_cpu = 0;      /* assume initial thread @ cpu 0 */
-
-			bind_next_cpu = bind_first_cpu + 1;
-			/* The final cpu to be bound by a thread */
-			bind_cpu_limit = bind_first_cpu + NP;
-
-			CPU_ZERO(&cpuset);
-			CPU_SET((bind_first_cpu % NP), &cpuset);
-			if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
-				ort_warning("pthread_setaffinity_np failed; could not bind master thread\n");
-
-			/* prepare a full cpuset */
+		/* prepare a full cpuset */
+		if ( pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &fullset) )
+		{
+			ort_warning("pthread_getaffinity_np() failed;\n\t could not get CPU "
+			            "affinity mask of the initial thread\n");
+			NPC = ort_get_num_procs_conf();
+			gotaffinity = 0;
 			CPU_ZERO(&fullset);
-			for (j = 0; j < NP; j++)
+			for (j = 0; j < NPC && j < CPU_SETSIZE; j++)
 				CPU_SET(j, &fullset);
 		}
+
+		if ((bind_first_cpu = sched_getcpu()) < 0)
+		{
+			if (!gotaffinity)
+				bind_first_cpu = 0;   /* Assume initial thread @cpu0 */
+			else
+				for (j = 0; j < CPU_SETSIZE; j++)
+					if (CPU_ISSET(j, &fullset))
+					{
+						bind_first_cpu = j;
+						break;
+					};
+		}
+
+		NP = init_cpus_onln(&fullset, &bind_first_cpu);
+		bind_next_cpu = bind_first_cpu + 1;
+		bind_cpu_limit = bind_first_cpu + NP;
+		CPU_ZERO(&cpuset);
+		CPU_SET(cpus_onln[bind_first_cpu], &cpuset);
+		if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
+			ort_warning("pthread_getaffinity_np() failed;\n\t could not bind "
+			            "the initial thread\n");
 	}
 #endif
 
 	/* Get a local copy of thread attributes */
 	if (globalattr != NULL)
 		localattr = *globalattr;
+	else /* in case no global attribute exists, initialize the local copy */
+		pthread_attr_init(&localattr);
+
+	/* All transient threads are created in detached mode */
+	if (thrtype == TRANSIENT)
+		pthread_attr_setdetachstate(&localattr, PTHREAD_CREATE_DETACHED);
+
+	if (thrtype == FORKJOIN)                      /* Get the table of ids */
+		thrids = ort_alloc(n*sizeof(pthread_t));
 
 	for (i = 0; i < n; i++)
 	{
-		if ((node = (othr_pool_t *)ort_alloc(sizeof(othr_pool_t))) == NULL)
-			ort_error(5, "_new_bunch_of_threads() failed; could not allocate memory\n");
-
-		if (i == 0)  /* Store first node... */
-		{
-			first_node = node;
-			prev_node = node;
-		}
+		node = (thrpool_t *) ort_alloc(sizeof(thrpool_t));
+		if (i == 0)
+			first_node = prev_node = node;
 		else
 		{
-			prev_node->next = (othr_pool_t *)node;
+			prev_node->next = (thrpool_t *) node;
 			prev_node = node;
 		}
 
-#ifdef CAN_BIND
-		/* If there are cpus without bounded threads */
+#ifdef HAVE_PTHREAD_AFFINITY
+		/* If there are cpus without bound threads */
 		if (proc_bind)
 		{
+			cpusetptr = &fullset;
 			if (bind_next_cpu < bind_cpu_limit)
 			{
-				/* Here we get the next available free cpu id
-				  * and store it to a local copy.
-				  */
+				/* Get the next available free cpu id and store it in a local copy */
 #if defined(HAVE_ATOMIC_FAA)
 				local_next_cpu = _faa(&(bind_next_cpu), 1);
 #else
@@ -218,42 +420,47 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail, int thread_type)
 
 				/* Re-check the value of cpu to bind */
 				if (local_next_cpu < bind_cpu_limit)
-				{
-					CPU_ZERO(&cpuset);
-					CPU_SET((local_next_cpu % NP), &cpuset);
-					if (pthread_attr_setaffinity_np(&localattr, sizeof(cpuset),
-					                                (const cpu_set_t *) &cpuset))
-						ort_warning("could not bind thread %d on cpu %d\n", i, local_next_cpu);
-				}
-				else
-					pthread_attr_setaffinity_np(&localattr, sizeof(fullset),
-					                            (const cpu_set_t *) &fullset);
+					if (gotaffinity && CPU_ISSET((cpus_onln[local_next_cpu % NP]), &fullset))
+					{
+						CPU_ZERO(&cpuset);
+						CPU_SET((cpus_onln[local_next_cpu % NP]), &cpuset);
+						cpusetptr = &cpuset;
+					};
 			}
-			else
-				pthread_attr_setaffinity_np(&localattr, sizeof(fullset),
-				                            (const cpu_set_t *) &fullset);
+
+			if ( pthread_attr_setaffinity_np(&localattr,sizeof(cpu_set_t),cpusetptr) )
+			{
+				if (cpusetptr != &fullset)
+					ort_warning("could not set affinity mask of thread %d to cpu %d\n",
+					            i, cpus_onln[local_next_cpu % NP]);
+				else
+					ort_warning("could not set affinity mask of thread %d\n", i);
+			}
 		}
 #endif
 
-		node->spin = 1;
-		node->type = thread_type;
+		if (waitpolicy != _OMP_ACTIVE)
+		{
+			pthread_mutex_init((pthread_mutex_t *) &node->wait_mut, NULL);
+			pthread_cond_init((pthread_cond_t *) &node->wait_cond, NULL);
+		}
+		node->wait = 1;
+		node->type = thrtype;
+		if (thrtype == FORKJOIN)
+		{
+			node->id = i+1;                 /* other thread types get an id later */
+			node->arg = tail;               /* hack ;-) */
+		}
 		FENCE;
 
-		if (thread_type == TEMP)
-		{
-			if ((e = pthread_create(&thr, globalattr ? &localattr : NULL,
-			                        threadjob_and_exit, (void *) node)))
-				ort_error(5, "pthread_create() failed with %d\n", e);
+		if ((e = pthread_create(&thr, &localattr,
+		                        (thrtype == PERSISTENT) ? persistent_thread :
+		                        ((thrtype == TRANSIENT) ? transient_thread :
+		                                                  forkjoin_thread),
+		                        (void *) node)))
+			ort_error(5, "pthread_create() failed with %d\n", e);
 
-			pthread_detach(thr);
-		}
-		else
-		{
-			if ((e = pthread_create(&thr, globalattr ? &localattr : NULL,
-			                        threadjob, (void *) node)))
-				ort_error(5, "pthread_create() failed with %d\n", e);
-		}
-
+		(thrtype == FORKJOIN) && (thrids[i] = thr);
 
 #ifdef __SYSOS_solaris
 		if (created_threads < NP)
@@ -272,8 +479,26 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail, int thread_type)
 	}
 
 	node->next = NULL;
-	if (tail) *tail = (othr_pool_t *)node;
-	return ((othr_pool_t *)first_node);
+	if (tail)
+		*tail = (thrpool_t *) node;
+	if (thrtype == FORKJOIN)
+		return ((thrpool_t *) thrids);
+	else
+		return ((thrpool_t *) first_node);
+}
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *                                                                 *
+ *  MAIN THREADING INTERFACE                                       *
+ *                                                                 *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+void _othr_info()  /* Useless for now */
+{
+	puts("OMPI_PTHREADS_MAXTHR : overall limit of running threads [ <int> ]");
+  puts("OMPI_PTHREADS_POLICY : threads lifetime [ pool|prepool|kill ]");
 }
 
 
@@ -281,10 +506,12 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail, int thread_type)
  */
 int othr_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 {
-	int nthr;
+	int  nthr;
+	bool prepool;
+	char *s;
 
 	nthr = (icv->nthreads >= 0) ?  /* Explicitely requested population */
-	       icv->nthreads :
+	       icv->nthreads :   /* this does not include the initial thread */
 	       icv->ncpus - 1;   /* we don't handle the initial thread */
 
 	if (icv->threadlimit != -1 && nthr > icv->threadlimit)
@@ -293,46 +520,68 @@ int othr_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 	caps->supports_nested            = 1;
 	caps->supports_dynamic           = 1;
 	caps->supports_nested_nondynamic = 1;
-	caps->max_levels_supported       = -1;     /* No limit */
+	caps->max_levels_supported       = 1<<30;  /* infinity */
 	caps->default_numthreads         = nthr;
-	caps->max_threads_supported      = -1;     /* no limit */
+	caps->max_threads_supported      = 1<<30;  /* infinity */
+#ifdef HAVE_PTHREAD_AFFINITY
+	caps->supports_proc_binding      = 1;
+#else
+	caps->supports_proc_binding      = 0;
+#endif
 
 	if (pthread_lib_inited) return (0);
 
-	threadlimit    = icv->threadlimit;
-	threadscreated = 0;
+	threadsalive = 0;
+	waitpolicy     = icv->waitpolicy;
 	proc_bind      = icv->proc_bind;
 	ompi_icv       = icv;
+	throttling     = icv->ncpus;        /* Oversubscription threshold */
 
 	if (icv->stacksize != -1)
 	{
-		if ((globalattr = (pthread_attr_t *)
-		                  ort_alloc_aligned(sizeof(pthread_attr_t), NULL)) == NULL)
-			ort_error(5, "othr_init() failed; could not create stack attributes\n");
+		globalattr = (pthread_attr_t *)
+		             ort_alloc_aligned(sizeof(pthread_attr_t), NULL);
 		pthread_attr_init(globalattr);
 		if (pthread_attr_setstacksize(globalattr, icv->stacksize) != 0)
 			ort_error(5, "pthread_attr_setstacksize() failed.\n");
 	}
 
-	if (nthr > 0 && icv->waitpolicy == _OMP_ACTIVE)
+	/* Default behavior; but be flexible */
+	keepthreads = true;     /* Mainain a thread pool */
+	prepool = false;        /* but don't create it in advance */
+	if ((s = getenv("OMPI_PTHREADS_POLICY")) != NULL)
 	{
+		if (strncasecmp(s, "KILL", 4) == 0)
+			keepthreads = false;
+		else
+			if (strncasecmp(s, "PREPOOL", 7) == 0)
+				prepool = true;
+	}
+	threadlimit = -1;
+	if ((s = getenv("OMPI_PTHREADS_MAXTHR")) != NULL)
+		threadlimit = atoi(s);
+	if (threadlimit < 1)
+		threadlimit = 1<<30;
+
 #ifdef HAVE_PTHREAD_SETCONCURRENCY
+	if (nthr > 0)
 		pthread_setconcurrency(icv->ncpus);
+	else
+		pthread_setconcurrency(1);
 #endif
 
-		H = _new_bunch_of_threads((icv->ncpus - 1), NULL, PERM);     /* Create the initial pool of permanent threads */
+	othr_init_lock(&plock, ORT_LOCK_SPIN);
 
-		threadscreated = icv->ncpus;
-		othr_init_lock(&plock, ORT_LOCK_SPIN);
-		plen = icv->ncpus - 1;
+	if (keepthreads && prepool && nthr > 0)
+	{
+		/* Create the initial pool of persistent threads */
+		H = _new_bunch_of_threads(nthr, PERSISTENT, NULL);
+		threadsalive = nthr+1;   /* +1 for the initial thread */
+		plen = nthr;
 	}
 	else
 	{
-#ifdef HAVE_PTHREAD_SETCONCURRENCY
-		pthread_setconcurrency(1);
-#endif
-		threadscreated = 1;
-		othr_init_lock(&plock, ORT_LOCK_SPIN);
+		threadsalive = 1;
 		plen = 0;
 	}
 
@@ -346,150 +595,213 @@ void othr_finalize(int exitvalue)
 }
 
 
-/* The function executed by temporary threads */
-void *threadjob_and_exit(void *env)
+/**
+ * Request for a number of threads to execute parallelism in a certain level
+ * @param numthr the requested number of threads
+ * @param level  the level of parallelism
+ * @param oversubscribe if false, no new threads will be created; only threads
+ *               from the pool will be used
+ * @return       the actual number of threads the library can provide
+ */
+int othr_request(int numthr, int level, int oversubscribe)
 {
-	volatile othr_info *myinfo;
-	volatile othr_pool_t *env_t = (othr_pool_t *)env;
-	int free_my_self = 0;
+	int        new, ntrans, tmpplen;
+	thrpool_t *bunch, *tail;
 
-#ifdef __SYSOS_solaris
-	if (env_t->creation_id != -1)
-		processor_bind(P_LWPID, env_t->creation_id, env_t->creation_id - 1, NULL);
-#endif
+	if (numthr <= 0) return (0);
 
-	/* Wait for work */
-	WAIT_WHILE(env_t->spin, WORKER_YIELD);
-
-	env_t->spin = 1;                  /* Prepare me for next round */
-	ort_ee_dowork(env_t->id, env_t->arg); /* Execute requested code */
-
-	myinfo = env_t->info;             /* Moved this up - thanks to M-CC */
-	/* Update the "running" field of my parent's node */
-	myinfo->running[env_t->id] = 0;
-
-	ort_ee_exit();
-
-	return NULL;
-}
-
-/* The function executed by normal threads */
-void *threadjob(void *env)
-{
-	volatile othr_info *myinfo;
-	volatile othr_pool_t *env_t = (othr_pool_t *)env;
-
-#ifdef __SYSOS_solaris
-	if (env_t->creation_id != -1)
-		processor_bind(P_LWPID, env_t->creation_id, env_t->creation_id - 1, NULL);
-#endif
-
-	while (1)
+	if (level == 1) /* Initial thread; no need for locking */
 	{
-		/* Wait for work */
-		WAIT_WHILE(env_t->spin, WORKER_YIELD);
-
-		env_t->spin = 1;                  /* Prepare me for next round */
-		ort_ee_dowork(env_t->id, env_t->arg); /* Execute requested code */
-
-		myinfo = env_t->info;             /* Moved this up - thanks to M-CC */
-		/* Update the "running" field of my parent's node */
-		myinfo->running[env_t->id] = 0;
-	}
-}
-
-
-/* Request for "numthr" threads to execute parallelism in level "level" */
-int othr_request(int numthr, int level)
-{
-	int         new, tmpplen;
-	othr_pool_t *bunch, *tail;
-
-	if (level == 1)      /* Only the master thread is here, no need for locking */
-	{
-		if (numthr <= plen)
+		if (numthr <= plen)          /* We have enough threads already */
 			plen -= numthr;
 		else
-		{
-			new = numthr - plen;
-			if (threadlimit != -1 && new + threadscreated > threadlimit)
+			if (oversubscribe == 0)    /* Not enough; but create conservatively */
 			{
-				new = threadlimit - threadscreated;
-				if(new < 0)
-					new = 0;
+				if (threadsalive < throttling)    /* don't oversubscribe */
+				{
+					new = numthr - plen;   /* Need that many more ideally */
+					if (new > throttling - threadsalive)    /* but force limits */
+						new = throttling - threadsalive;
+					if (new > threadlimit)
+						new = threadlimit;
+					if (keepthreads)
+					{
+						bunch = _new_bunch_of_threads(new, PERSISTENT, &tail);
+						tail->next = H;
+						H = bunch;
+						plen += new;
+						threadsalive += new;
+					}
+				}
+				numthr = plen;
+				plen = 0;
 			}
+			else                       /* Create as many as needed */
+			{
+				new = numthr - plen;
+				if (new + threadsalive > threadlimit)
+				{
+					new = threadlimit - threadsalive;
+					if (new < 0)
+						new = 0;
+				}
 
-			bunch = _new_bunch_of_threads(new, &tail, TEMP); /* Augment the pool with temporary threads*/
-			tail->next = H;
-			H = bunch;
+				if (!keepthreads)        /* Forkjoin threads */
+					return new;
 
-			threadscreated += new;
-			numthr = plen + new;
-			plen = 0;
-		}
+				ntrans = (new+threadsalive > throttling) ? /* Excess are transient */
+				            new + threadsalive - throttling : 0;
+				if (new-ntrans > 0)
+				{
+					bunch = _new_bunch_of_threads(new - ntrans, PERSISTENT, &tail);
+					tail->next = H;
+					H = bunch;
+				}
+				if (ntrans)                                 /* The remaining threads */
+				{                                           /* will be transient */
+					bunch = _new_bunch_of_threads(ntrans, TRANSIENT, &tail);
+					tail->next = H;
+					H = bunch;
+				}
+				threadsalive += new;
+				numthr = plen + new;
+				plen = 0;
+			}
+		return numthr;
+	}
 
+	/* level >= 2 */
+	if (level > ompi_icv->levellimit)
+		return 0;
+
+	othr_set_lock(&plock);  /* lock in order to check the limits */
+	if (numthr <= plen)
+	{
+		plen -= numthr;
+		othr_unset_lock(&plock);
 	}
 	else
-	{
-		if (ompi_icv->levellimit != -1 && level > ompi_icv->levellimit)
-			return 0;
-		othr_set_lock(&plock);  /* lock in order to check the limits */
-		if (numthr <= plen)
+		if (oversubscribe == 0)
 		{
-			plen -= numthr;
+			if (threadsalive < throttling)    /* don't oversubscribe */
+			{
+				new = numthr - plen;   /* Need that many more ideally */
+				if (new > throttling - threadsalive)    /* but force limits */
+					new = throttling - threadsalive;
+				if (new > threadlimit)
+					new = threadlimit;
+				if (keepthreads)
+				{
+					othr_unset_lock(&plock);
+					bunch = _new_bunch_of_threads(new, PERSISTENT, &tail);
+					othr_set_lock(&plock);
+					tail->next = H;
+					H = bunch;
+					plen += new;
+					threadsalive += new;
+				}
+			}
+			numthr = plen;
+			plen = 0;
 			othr_unset_lock(&plock);
 		}
 		else
 		{
 			new = numthr - plen;
-			if (threadlimit != -1 && new + threadscreated > threadlimit)
+			if (new + threadsalive > threadlimit)
 			{
-				new = threadlimit - threadscreated;
-				if(new < 0)
+				new = threadlimit - threadsalive;
+				if (new < 0)
 					new = 0;
 			}
-
-			threadscreated += new;
-			tmpplen = plen;
-			plen = 0;
+			ntrans = (new+threadsalive > throttling) ?   /* Excess are transient */
+			               new + threadsalive - throttling : 0;
+			if (keepthreads)
+			{
+				threadsalive += new;
+				tmpplen = plen;
+				plen = 0;
+			}
 			othr_unset_lock(&plock);
 
-			if (new == 0) return (tmpplen);
+			if (!keepthreads)
+				return new;
+			if (new == 0)
+				return (tmpplen);
 
-			bunch = _new_bunch_of_threads(new, &tail, TEMP); /* Augment the pool with temporary threads*/
+			if (new-ntrans > 0)
+			{
+				bunch = _new_bunch_of_threads(new - ntrans, PERSISTENT, &tail);
+				othr_set_lock(&plock);
+				tail->next = H;
+				H = bunch;
+				othr_unset_lock(&plock);
+			}
+			if (ntrans)                                 /* The remaining threads */
+			{                                           /* will be transient */
+				bunch = _new_bunch_of_threads(ntrans, TRANSIENT, &tail);
+				othr_set_lock(&plock);
+				tail->next = H;
+				H = bunch;
+				othr_unset_lock(&plock);
+			}
 
-			othr_set_lock(&plock);
-			tail->next = H;
-			H = bunch;
-			othr_unset_lock(&plock);
 			numthr = tmpplen + new;
 		}
-	}
-	return (numthr);
+	return numthr;
 }
 
 
-/* Dispatches numthreads from the pool and gives them work to do */
+/**
+ * Dispatches numthr threads from the pool (or creates numthr FORKJOIN threads)
+ * to execute a parallel region.
+ * @param numthr the numer of threads
+ * @param level  the level of parallelism
+ * @param arg    an opaque argument that threads should pass to ort_ee_dowork()
+ * @param info   (return) stored at the master for controling the threads
+ */
 void othr_create(int numthr, int level, void *arg, void **info)
 {
-	volatile othr_pool_t *p;
-	volatile othr_info   *t = (othr_info *) *info;
-	int         i;
+	volatile thrpool_t *p;
+	volatile thrinfo_t *t = (thrinfo_t *) *info;
+	int                i;
 
-	if (t == NULL)  /* Thread becomes a parent for the first time */
+	if (t == NULL)  /* Thread becomes parent for the first time */
 	{
-		t = (othr_info *) ort_alloc_aligned(sizeof(othr_info), NULL);
-		t->running = (volatile int *) ort_alloc_aligned(MAX_BAR_THREADS * sizeof(int),
-		                                                NULL);
-		t->tp = (othr_pool_t **) ort_alloc_aligned(MAX_BAR_THREADS * sizeof(
-		                                             othr_pool_t *), NULL);
+		t = (thrinfo_t *) ort_calloc_aligned(sizeof(thrinfo_t), NULL);
+		// t->alloc_size = 0;         // Not required due to calloc
+		// t->actual_run_ptr = NULL;  // Not required due to calloc
+		// t->actual_tid_ptr = NULL;  // Not required due to calloc
 	}
 
-	t->team = numthr;
+	if ((numthr > t->teamsize) || ((t->alloc_size >= ALLOC_THRESHOLD) &&
+				(numthr <= (t->alloc_size >> 1))))
+	{
+		t->running = (volatile int *)
+		             ort_realloc_aligned(numthr * sizeof(int),
+					     (void **) &(t->actual_run_ptr));
+		t->tp = (thrpool_t **)
+		             ort_realloc_aligned(numthr * sizeof(thrpool_t *),
+					     (void **) &(t->actual_tid_ptr));
+		t->alloc_size = numthr;
+	}
+
+	t->teamsize = numthr;
 	t->level = level;
 
-	/* Wake up "nthr" threads and give them work to do */
-	/* Have to lock even if my level is 0 */
+	if (!keepthreads)   /* Create threads and return */
+	{
+		(level > 1) && othr_set_lock(&plock);
+		threadsalive += numthr;
+		(level > 1) && othr_unset_lock(&plock);
+		t->tids = (pthread_t *)
+		          _new_bunch_of_threads(numthr, FORKJOIN, (thrpool_t **) arg);
+		if (info)
+			*info = (thrinfo_t *) t;
+		return;
+	}
+
+	/* Wake up "numthr" threads and give them work to do; lock even at level 0 */
 	for (i = 1; i <= numthr; i++)
 	{
 		othr_set_lock(&plock);
@@ -498,67 +810,86 @@ void othr_create(int numthr, int level, void *arg, void **info)
 		othr_unset_lock(&plock);
 
 		t->running[i] = 1;
-		t->tp[i - 1] = (othr_pool_t *)p;
+		t->tp[i - 1] = (thrpool_t *) p;
 
 		p->arg  = arg;
-		p->info = (othr_info *)t;
+		p->info = (thrinfo_t *) t;
 		p->id   = i;
-		p->spin = 0;   /* Release thread i */
 
-		FENCE;
+		if (waitpolicy == _OMP_ACTIVE)
+		{
+			FENCE;
+			p->wait = 0;   /* Release thread i */
+		}
+		else
+		{
+			pthread_mutex_lock((pthread_mutex_t *) &p->wait_mut);
+			p->wait = 0;
+			pthread_cond_signal((pthread_cond_t *) &p->wait_cond);
+			pthread_mutex_unlock((pthread_mutex_t *) &p->wait_mut);
+		}
 	}
 
-	*info = (othr_info *)t;
+	if (info)
+		*info = (thrinfo_t *) t;
 }
 
+
 /*
- * TODO: Implement following:
- * Have to free info that is known by ort.
+ * TODO: Implement the following: free info that is known by ort.
  */
 void othr_free_info(void **info)
 {
 	;
 }
 
+
 /* Only the master thread can call this.
- * It blocks the thread waiting for all its children to finish their job.
+ * It blocks the thread, waiting for all its children to finish their job.
  */
 void othr_waitall(void **info)
 {
-	volatile othr_info *t = *info;
-	othr_pool_t  *normal_list_tail = NULL;
-	othr_pool_t  *normal_list_head = NULL;
-	int i;
-	int threads_entered = 0;
+	volatile thrinfo_t *t = *info;
+	thrpool_t    *normal_list_tail = NULL, *normal_list_head = NULL;
+	int          i, threads_entered = 0, temp_threads = 0;
 	volatile int *x;
-	int temp_threads = 0;
 
-	for (i = 1; i <= t->team; i++)
+	if (!keepthreads)           /* FORKJOIN threads */
+	{
+		for (i = 1; i <= t->teamsize; i++)
+			pthread_join(t->tids[i-1], NULL);
+		othr_set_lock(&plock);
+		threadsalive -= (t->teamsize - 1);
+		othr_unset_lock(&plock);
+		free(t->tids);            /* no longer needed */
+		return;
+	}
+
+	for (i = 1; i <= t->teamsize; i++)
 	{
 		x = &(t->running[i]);
 		WAIT_WHILE((*x == 1), MASTER_YIELD);
 	}
 
-	for (i = 0; i < t->team ; i++)
+	for (i = 0; i < t->teamsize ; i++)
 	{
-		if (threads_entered == 0
-		    && t->tp[i]->type == PERM) /* Find first normal thread */
+		if (threads_entered == 0 && t->tp[i]->type == PERSISTENT) /* the 1st one */
 		{
-			normal_list_head = t->tp[i]; /* Store first normal thread */
+			normal_list_head = t->tp[i];              /* Store first normal thread */
 			normal_list_tail = normal_list_head;
 			threads_entered ++;
 		}
-		else
+		else  /* Enqueue persistent threads in the same order for locality */
 		{
-			if (t->tp[i]->type == PERM)
+			if (t->tp[i]->type == PERSISTENT)
 			{
-				normal_list_tail->next = t->tp[i]; /* Store next normal thread */
+				normal_list_tail->next = t->tp[i];       /* Store next normal thread */
 				normal_list_tail = normal_list_tail->next;
 				threads_entered ++;
 			}
 			else
 			{
-				free(t->tp[i]); /* Free temporary thread's data */
+				free(t->tp[i]);                      /* Free transient thread's data */
 				temp_threads++;
 			}
 		}
@@ -566,26 +897,23 @@ void othr_waitall(void **info)
 
 	if (normal_list_head != NULL)
 	{
-		/* I have to reenter some normal threads... */
 		if (t->level != 0)
 			othr_set_lock(&plock);
 
-		normal_list_tail->next = H;
+		normal_list_tail->next = H;              /* Put them back in the pool */
 		H = normal_list_head;
-
 		plen += threads_entered;
 
 		if (t->level != 0)
 			othr_unset_lock(&plock);
 	}
 
-	if(temp_threads > 0)
+	if (temp_threads > 0)
 	{
-		/* I have to reduce the number of created threads */
 		if (t->level != 0)
 			othr_set_lock(&plock);
 
-		threadscreated -= temp_threads;
+		threadsalive -= temp_threads;          /* Just reduce the # of threads */
 
 		if (t->level != 0)
 			othr_unset_lock(&plock);
@@ -593,9 +921,61 @@ void othr_waitall(void **info)
 }
 
 
+/**
+ * Binds calling thread to any member of the given place
+ * @param places The array of places
+ * @param pindex The place to bind to
+ * @return       pindex if successful, < 0 otherwise
+ */
+int othr_bindme(int **places, int pindex)
+{
+#ifndef HAVE_PTHREAD_AFFINITY
+	return (BIND_UNAVAILABLE); /* Binding is unavailable */
+#else
+	int j;
+	cpu_set_t cpuset;
+
+	CPU_ZERO(&cpuset);
+	if (!places)
+		ort_warning("ee_bindme() call with NULL place partition ptr; ignoring\n");
+	else
+		if (pindex < 0 || pindex >= numplaces(places))
+			ort_warning("ee_bindme() call for illegal place (%d); ignoring\n",pindex);
+		else
+		{
+			for (j = 0; j < placelen(places, pindex); j++) /* placemembers2bitset */
+				CPU_SET(places[pindex+1][j+1], &cpuset);
+			if (pthread_setaffinity_np(pthread_self(),sizeof(cpu_set_t),&cpuset) == 0)
+				return (pindex);
+			else
+				ort_warning("othr_bindme() failed; could not bind thread\n");
+		}
+	return (BIND_ERROR); /* Binding failure */
+#endif
+}
+
+
+int othr_getselfid(void)
+{
+#if defined(HAVE_GETTID)
+	return gettid();
+#elif defined(HAVE_GETTID_SYSCALL)
+	return syscall(SYS_gettid);
+#else
+	return (-1); // Invalid ID
+#endif
+}
+
+
+void *othr_getself(unsigned int *size)
+{
+        return NULL;
+}
+
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                                 *
- *  LOCKS (identical to othr_pthreads1)                             *
+ *  LOCKS (identical to othr_pthreads1)                            *
  *                                                                 *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -644,6 +1024,7 @@ int othr_init_lock(othr_lock_t *lock, int type)
 	}
 }
 
+
 int othr_destroy_lock(othr_lock_t *lock)
 {
 	switch (lock->lock.type)
@@ -669,6 +1050,7 @@ int othr_destroy_lock(othr_lock_t *lock)
 			return pthread_mutex_destroy(&(lock->lock.data.normal));
 	}
 }
+
 
 int othr_set_lock(othr_lock_t *lock)
 {

@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_traverse.c -- generic traversal of the AST using callbacks @ each node */
@@ -225,11 +225,28 @@ void ast_stmt_traverse(aststmt tree, travopts_t *trop)
 		case VERBATIM:
 			visit_stmt(trop, verbatim_c, tree);
 			break;
+		case ASMSTMT:
+			pre_visit_stmt(trop, asmstmt_c, tree);
+			if (tree->u.assem->qualifiers)
+				ast_spec_traverse(tree->u.assem->qualifiers, trop);
+			/* We do not descent to in/outs yet; maybe some other day (not!). */
+			/* 
+			if (tree->u.assem->outs)
+				ast_asmop_traverse(tree->u.assem->outs, trop);
+			if (tree->u.assem->ins)
+				ast_asmop_traverse(tree->u.assem->ins, trop);
+			*/
+			if (tree->u.assem->clobbers)
+				ast_expr_traverse(tree->u.assem->clobbers, trop);
+			if (tree->u.assem->labels)
+				ast_expr_traverse(tree->u.assem->labels, trop);
+			post_visit_stmt(trop, asmstmt_c, tree);
+			break;
 		case OX_STMT:
 			ast_oxcon_traverse(tree->u.ox, trop);
 			break;
 		default:
-			fprintf(stderr, "[ast_stmt_traverse]: b u g !!\n");
+			fprintf(stderr, "[ast_stmt_traverse]: b u g (%d) !!\n", tree->type);
 	}
 }
 
@@ -330,9 +347,9 @@ void ast_expr_traverse(astexpr tree, travopts_t *trop)
 			break;
 		case ASS:
 			pre_visit_expr(trop, ass_c, tree);
-			ast_expr_traverse(tree->left, trop);
+			ast_expr_traverse(trop->lrorder == LRORDER ? tree->left : tree->right, trop);
 			mid_visit_expr(trop, ass_c, tree);
-			ast_expr_traverse(tree->right, trop);
+			ast_expr_traverse(trop->lrorder == LRORDER ? tree->right : tree->left, trop);
 			post_visit_expr(trop, ass_c, tree);
 			break;
 		case DESIGNATED:
@@ -393,18 +410,24 @@ void ast_spec_traverse(astspec tree, travopts_t *trop)
 					pre_visit_spec(trop, specenum_c, tree);
 					if (tree->body)
 						ast_spec_traverse(tree->body, trop);
+					if (tree->sueattr)
+						ast_spec_traverse(tree->sueattr, trop);
 					post_visit_spec(trop, specenum_c, tree);
 					break;
 				case SPEC_struct:
 					pre_visit_spec(trop, specstruct_c, tree);
 					if (tree->u.decl)
 						ast_decl_traverse(tree->u.decl, trop);
+					if (tree->sueattr)
+						ast_spec_traverse(tree->sueattr, trop);
 					post_visit_spec(trop, specstruct_c, tree);
 					break;
 				case SPEC_union:
 					pre_visit_spec(trop, specunion_c, tree);
 					if (tree->u.decl)
 						ast_decl_traverse(tree->u.decl, trop);
+					if (tree->sueattr)
+						ast_spec_traverse(tree->sueattr, trop);
 					post_visit_spec(trop, specunion_c, tree);
 					break;
 				default:
@@ -437,6 +460,9 @@ void ast_spec_traverse(astspec tree, travopts_t *trop)
 					fprintf(stderr, "[ast_spec_traverse]: list b u g !!\n");
 			}
 			post_visit_spec(trop, speclist_c, tree);
+			break;
+		case ATTRSPEC:
+			visit_spec(trop, spec_c, tree);
 			break;
 		default:
 			fprintf(stderr, "[ast_spec_traverse]: b u g !!\n");
@@ -590,6 +616,34 @@ void ast_decl_traverse(astdecl tree, travopts_t *trop)
 			
 #define PRUNING(trop,f) ((trop)->ompclausec.prune_##f)
 
+
+void ast_omparrdim_traverse(omparrdim d, travopts_t *trop)
+{
+	if (!PRUNING(trop, ompclexpr_c))
+	{
+		ast_expr_traverse(d->lb, trop);
+		if (d->len)
+			ast_expr_traverse(d->len, trop);
+	}
+}
+
+
+void ast_ompxli_traverse(ompxli xl, travopts_t *trop)
+{
+	omparrdim s;
+	
+	for (; xl; xl = xl->next)
+	{
+		// TODO pre-visit
+		// TODO maybe we need to somehow record the identifier (?)
+		if (xl->xlitype == OXLI_ARRSEC)
+			for (s = xl->dim; s; s = s->next)
+				ast_omparrdim_traverse(s, trop);
+		// TODO post-visit
+	}
+}
+
+
 void ast_ompclause_traverse(ompclause t, travopts_t *trop)
 {
 	if (!trop->doomp || t == NULL)
@@ -602,6 +656,10 @@ void ast_ompclause_traverse(ompclause t, travopts_t *trop)
 		case OCNUMTHREADS:
 		case OCDEVICE:
 		case OCSCHEDULE:
+		case OCNUMTEAMS:
+		case OCTHREADLIMIT:
+		case OCHINT:
+		case OCPRIORITY:
 			pre_visit_ompclause(trop, ompclexpr_c, t);
 			if (!PRUNING(trop, ompclexpr_c))
 				if (t->u.expr)
@@ -622,14 +680,32 @@ void ast_ompclause_traverse(ompclause t, travopts_t *trop)
 		case OCFIRSTPRIVATE:
 		case OCLASTPRIVATE:
 		case OCSHARED:
-		case OCTO:
-		case OCFROM:
+		case OCISDEVPTR:
+		case OCUSEDEVPTR:
 		case OCAUTO:
-		case OCMAP:
-		case OCREDUCTION:
 			pre_visit_ompclause(trop, ompclvars_c, t);
 			if (!PRUNING(trop, ompclvars_c))
 				ast_decl_traverse(t->u.varlist, trop);
+			post_visit_ompclause(trop, ompclvars_c, t);
+			break;
+		case OCDEPEND:
+			if (t->subtype == OC_sink)
+			{
+				pre_visit_ompclause(trop, ompclexpr_c, t);
+				if (!PRUNING(trop, ompclexpr_c))
+					if (t->u.expr)
+						ast_expr_traverse(t->u.expr, trop);
+				post_visit_ompclause(trop, ompclexpr_c, t);
+				break;
+			}
+		case OCTO:
+		case OCFROM:
+		case OCLINK:
+		case OCREDUCTION:
+		case OCMAP:
+			pre_visit_ompclause(trop, ompclvars_c, t);
+			if (!PRUNING(trop, ompclvars_c))
+				ast_ompxli_traverse(t->u.xlist, trop);
 			post_visit_ompclause(trop, ompclvars_c, t);
 			break;
 		case OCDEFAULT:
@@ -637,14 +713,18 @@ void ast_ompclause_traverse(ompclause t, travopts_t *trop)
 		case OCCOLLAPSE:
 		case OCNOWAIT:
 		case OCORDERED:
+		case OCORDEREDNUM:
 		case OCUNTIED:
 		case OCMERGEABLE:
 		case OCPARALLEL:
 		case OCSECTIONS:
 		case OCFOR:
 		case OCTASKGROUP:
+		case OCDEFAULTMAP:
 			visit_ompclause(trop, ompclplain_c, t);
 			break;
+		default:
+			fprintf(stderr, "[ast_ompclause_traverse]: b u g !! (type=%d)\n",t->type);
 	}
 }
 
@@ -667,7 +747,10 @@ void ast_ompdir_traverse(ompdir t, travopts_t *trop)
 	switch (t->type)
 	{
 		case DCCRITICAL:
-			visit_ompdircon(trop, ompdircrit_c, t);
+			pre_visit_ompdircon(trop, ompdircrit_c, t);
+			if (t->clauses)
+				ast_ompclause_traverse(t->clauses, trop);
+			post_visit_ompdircon(trop, ompdircrit_c, t);
 			break;
 		case DCFLUSH:
 			pre_visit_ompdircon(trop, ompdirflush_c, t);
@@ -699,7 +782,7 @@ void ast_ompcon_traverse(ompcon t, travopts_t *trop)
 		ast_ompdir_traverse(t->directive, trop);
 	}
 	
-	if (t->body)     /* barrier & flush don't have a body. */
+	if (t->body)     /* stand-alones don't have a body. */
 		ast_stmt_traverse(t->body, trop);
 	
 	if (trop->doomp)
@@ -741,6 +824,10 @@ void ast_oxclause_traverse(oxclause t, travopts_t *trop)
 			break;
 		case OX_OCATNODE:
 		case OX_OCATWORKER:
+		case OX_OCIF:
+		case OX_OCHINTS:
+		case OX_OCLOCAL:
+		case OX_OCREMOTE:
 		case OX_OCSTART:
 		case OX_OCSTRIDE:
 			pre_visit_oxnode(trop, oxclexpr_c, t);
@@ -809,8 +896,9 @@ void travopts_init_batch(travopts_t *trop,
                     void (*oxdircb)(oxdir t,         void *starg, int vistime), 
                     void (*oxconcb)(oxcon t,         void *starg, int vistime))
 {
-	trop->when   = PREVISIT;              /* Just give a default */
-	trop->starg  = NULL;
+	trop->when    = PREVISIT;              /* Just give a default */
+	trop->lrorder = LRORDER;
+	trop->starg   = NULL;
 	
 	trop->doexpr = (exprcb != NULL);
 	trop->dospec = (speccb != NULL);
@@ -836,6 +924,7 @@ void travopts_init_batch(travopts_t *trop,
 	trop->stmtc.funcdef_c = stmtcb;
 	trop->stmtc.stmtlist_c = stmtcb;
 	trop->stmtc.verbatim_c = stmtcb;
+	trop->stmtc.asmstmt_c = stmtcb;
 
 	trop->exprc.ident_c = exprcb;
 	trop->exprc.constval_c = exprcb;

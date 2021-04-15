@@ -32,7 +32,7 @@ parallelism at arbitrary depths and arbitrary numbers of
 threads. The catch is that the oversubscription of processors 
 is uncontrollable; the underlying operating system is 
 responsible for scheduling many threads onto few processors, 
-so overheads may rise. Be warned.
+so overheads may arise. Be warned.
 
 The above problems can be alleviated by using "psthr",
 an advanced high-performance library with efficient nested 

@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_gviz.h */
@@ -26,23 +26,6 @@
 #define __AST_GV_H__
 
 #include "ast.h"
-
-extern void ast_expr_gviz(astexpr tree);
-extern void ast_stmt_gviz(aststmt stmt);
-extern void ast_decl_gviz(astdecl tree);
-extern void ast_spec_gviz(astspec tree);
-extern void ast_ompcon_gviz(ompcon tree);
-extern void ast_ompdir_gviz(ompdir t);
-extern void ast_ompclause_gviz(ompclause t);
-extern void ast_oxclause_gviz(oxclause t);
-extern void ast_oxdir_gviz(oxdir tree);
-extern void ast_oxcon_gviz(oxcon tree);
-
-extern void ast_gviz(aststmt tree);
-extern void ast_gviz_stderr(aststmt tree);
-extern void ast_spec_gviz_stderr(astspec tree);
-extern void ast_decl_gviz_stderr(astdecl tree);
-extern void ast_expr_gviz_stderr(astexpr tree);
 
 /* Main interface
  */

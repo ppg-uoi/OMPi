@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_xform.h  */
@@ -26,7 +26,7 @@
 #define __AST_XFORM_H__
 
 #include "ast.h"
-#include "boolean.h"
+#include "stddefs.h"
 #include "symtab.h"
 
 extern void ast_xform(aststmt *tree);
@@ -39,18 +39,21 @@ extern void ast_ompdir_xform(ompdir *t);
 extern void ast_ompcon_xform(ompcon *t);
 extern void ast_omp_xform(aststmt *t);
 
-extern stentry newglobalvar(aststmt s);
-extern void    head_add(aststmt s);
-extern void    tail_add(aststmt s);
+/**
+ * Reproduces only the Declarator part of the original declaration; the
+ * special thing about this is that it takes care of arrays with missing
+ * size for the 1st dimension.
+ * 
+ * @param e  The symtab entry for the var whose declaratοr we want to reproduce
+ * @return   A declaration node (astdecl)
+ */
+extern astdecl xform_clone_declonly(stentry e);
 
-/* This takes care of placing the produced thread functions */
-extern void xform_add_threadfunc(symbol fname, aststmt fd, aststmt curfunc);
-
-/* Produces an identical declaration which may optionally have an initializer
- * or convert the variable into a pointer
+/* Produces an identical declaration which may optionally have a new var name,
+ * an initializer and/or convert the variable into a pointer
  */
 extern aststmt xform_clone_declaration(symbol s, astexpr initer,
-                                       bool mkpointer);
+                                       bool mkpointer, symbol snew);
 
 /* Reproduces the original declaration of a function */
 extern aststmt xform_clone_funcdecl(symbol funcname);
@@ -73,11 +76,7 @@ extern int closest_parallel_scope;
 extern int target_data_scope;
 
 /* Used in outline.c for setting isindevenv of functions */
-extern bool inDeclTarget;
-
-/* The code from declare target and target that will be exported in a new file.
- */
-extern aststmt decltargtree, targtree;
+extern int inDeclTarget;
 
 /* This one checks whether an openmp construct should include an
  * implicit barrier.

@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_xform.c */
@@ -38,13 +38,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include "ompi.h"
+#include "builder.h"
+#include "dfa.h"
 #include "ast_copy.h"
 #include "ast_free.h"
 #include "ast_print.h"
 #include "ast_vars.h"
 #include "ast_xform.h"
-#include "boolean.h"
-#include "dfa.h"
 #include "x_clauses.h"
 #include "x_parallel.h"
 #include "x_arith.h"
@@ -55,10 +56,12 @@
 #include "x_thrpriv.h"
 #include "x_shglob.h"
 #include "x_target.h"
+#include "x_decltarg.h"
 #include "x_types.h"
 #include "x_cars.h"
+#include "x_teams.h"
+#include "x_arrays.h"
 #include "ox_xform.h"
-#include "ompi.h"
 
 /*
  * 2009/12/09:
@@ -79,8 +82,9 @@ int target_data_scope = -1;
 
 /* Used in outline.c for setting isindevenv of functions and here to prevent
  * target pragmas inside declare target
+ * -- made it an int to cover multiply #declared items in v45 (VVD)
  */
-bool inDeclTarget = false;
+int inDeclTarget = 0;
 
 /* Used for determining the label for the cancel parallel GOTOs
  */
@@ -89,78 +93,6 @@ static int cur_parallel_line = 0;
 /* Used for determining the label for the cancel taskgroup GOTOs
  */
 static int cur_taskgroup_line = 0;
-
-static aststmt newglobals = NULL, newtail = NULL;
-
-
-stentry newglobalvar(aststmt s)
-{
-	astdecl decl;
-	stentry e;
-
-	if (newglobals == NULL)
-		newglobals = s;
-	else
-	{
-		aststmt t = newglobals;
-		newglobals = BlockList(t, s);
-		t->parent = newglobals;          /* Parentize correctly */
-		s->parent = newglobals;
-	}
-
-	assert(s->type == DECLARATION);    /* Declare it, too */
-	decl = s->u.declaration.decl;
-	e = symtab_insert_global(stab, decl_getidentifier_symbol(decl), IDNAME);
-	if (decl->type == DINIT)
-		decl = (e->idecl = decl)->decl;
-	e->decl       = decl;
-	e->spec       = s->u.declaration.spec;
-	e->isarray    = (decl_getkind(decl) == DARRAY);
-	e->isthrpriv  = false;
-	e->scopelevel = 0;
-
-	/* If we are in a target, add the variable to the current target tree */
-	if (inTarget())
-	{
-		//targnewglobals = targnewglobals ? BlockList(targnewglobals, s) : s;
-		declaretarget_inject_ident( decl_getidentifier_symbol(decl) );
-		e->isindevenv = 3;
-	}
-	/* VVD--If in a declare target, add the variable to the totally global list */
-	if (inDeclTarget)
-	{
-		declaretarget_inject_ident( decl_getidentifier_symbol(decl) );
-		e->isindevenv = 1;
-	}
-
-	return (e);
-}
-
-
-static void aststmt_add(aststmt *to, aststmt s)
-{
-	if (*to == NULL)
-		*to = s;
-	else
-	{
-		aststmt t = *to;
-		*to = BlockList(t, s);
-		t->parent = *to;          /* Parentize correctly */
-		s->parent = *to;
-	}
-}
-
-
-void head_add(aststmt s)
-{
-	aststmt_add(&newglobals, s);
-}
-
-
-void tail_add(aststmt s)
-{
-	aststmt_add(&newtail, s);
-}
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -182,14 +114,27 @@ void ast_stmt_iteration_xform(aststmt *t)
 	switch ((*t)->subtype)
 	{
 		case SFOR:
+		{
+			int newscope = false;
+			
 			if ((*t)->u.iteration.init != NULL)
+			{
+				if ((*t)->u.iteration.init->type == DECLARATION)
+				{
+					newscope = true;
+					scope_start(stab);  /* New scope for the declared variable(s) */
+				}
 				ast_stmt_xform(&((*t)->u.iteration.init));
+			}
 			if ((*t)->u.iteration.cond != NULL)
 				ast_expr_xform(&((*t)->u.iteration.cond));
 			if ((*t)->u.iteration.incr != NULL)
 				ast_expr_xform(&((*t)->u.iteration.incr));
 			ast_stmt_xform(&((*t)->body));
+			if (newscope)
+				scope_end(stab);
 			break;
+		}
 		case SWHILE:
 			if ((*t)->u.iteration.cond != NULL)
 				ast_expr_xform(&((*t)->u.iteration.cond));
@@ -265,29 +210,42 @@ void ast_stmt_xform(aststmt *t)
 			xt_declaration_xform(t);   /* transform & declare */
 			break;
 		case FUNCDEF:
-			/* First declare the function */
-			if (symtab_get(stab, decl_getidentifier_symbol((*t)->u.declaration.decl),
-			               FUNCNAME) == NULL)
-				symtab_put(stab, decl_getidentifier_symbol((*t)->u.declaration.decl),
-				           FUNCNAME);
-
+		{
+			symbol  fsym = decl_getidentifier_symbol((*t)->u.declaration.decl);
+			stentry f    = symtab_get(stab, fsym, FUNCNAME);
+			
+			assert(f == NULL || f->funcdef == NULL); /* should not be def'ed twice */
+			
+			/* First declare the function & store its definition stmt */
+			if (f == NULL)
+			{
+				f = symtab_put(stab,fsym, FUNCNAME);
+				f->spec = (*t)->u.declaration.spec;
+				f->decl = (*t)->u.declaration.decl;
+			}
+			f->funcdef = *t;
+			
+			if (decltarg_id_isknown(fsym)) /* Note that we have a #declare function */
+			{
+				inDeclTarget++;
+				decltarg_bind_id(f);  /* Mark it, too */
+			}
+			
 			scope_start(stab);         /* New scope here */
 
 			if ((*t)->u.declaration.dlist) /* Old style */
 			{
-				ast_stmt_xform(&((*t)->u.declaration.dlist));  /* declared themselves */
+				/* Take care of array params *before* declaring them */
 				xt_dlist_array2pointer((*t)->u.declaration.dlist);  /* !!array params */
+				ast_stmt_xform(&((*t)->u.declaration.dlist));  /* declared themselves */
 			}
 			else                           /* Normal; has paramtypelist */
 			{
-				/* Used to do xt_barebones_decl((*t)->u.declaration.decl);
-				 * Bug detected by sagathos, 2009/12/04.
-				 */
 				xt_barebones_substitute(&((*t)->u.declaration.spec),
 				                        &((*t)->u.declaration.decl));
-				ast_declare_function_params((*t)->u.declaration.decl);/* decl manualy */
-				/* take care of array params */
+				/* Take care of array params *before* declaring them */
 				xt_decl_array2pointer((*t)->u.declaration.decl->decl->u.params);
+				ast_declare_function_params((*t)->u.declaration.decl);/* decl manualy */
 			}
 			ast_stmt_xform(&((*t)->body));
 			tp_fix_funcbody_gtpvars((*t)->body);    /* take care of gtp vars */
@@ -296,6 +254,12 @@ void ast_stmt_xform(aststmt *t)
 				analyze_pointerize_sgl(*t);        /* just replace them with pointers */
 
 			scope_end(stab);           /* Scope done! */
+			
+			if (decltarg_id_isknown(fsym))  /* #declare function no more */
+				inDeclTarget--;
+			break;
+		}
+		case ASMSTMT:
 			break;
 		case OMPSTMT:
 			if (enableOpenMP || testingmode) ast_omp_xform(t);
@@ -389,31 +353,87 @@ aststmt ompdir_commented(ompdir d)
 	return (st);
 }
 
+
 /**
- * Reproduces the original declaration which may optionally have an initializer
- * or convert the variable into a pointer
+ * If the original array was declared with its 1st dimension size missing,
+ * then any copy will be problematic because it will not have an initializer
+ * from which to discover the size. This function fixes it by forcing a
+ * size based on the cardinality of the original array initializer.
+ * 
+ * @param copy  A clone of the original array declaration
+ * @param orig  The original array declaration (with initializer)
+ * @return      The clone (copy), with modified 1st dimension
+ */
+static
+astdecl fix_array_decl_copy(astdecl copy, astdecl orig)
+{
+	/* arr_dimension_size(copy, 0, NULL) is assumed to be NULL */
+	int ic = decl_initializer_cardinality(orig);
+	
+	if (ic == 0)
+		exit_error(2, "(%s, line %d): cannot determine missing dimension "
+		              "size of '%s'\n", orig->file->name, orig->l, 
+		              decl_getidentifier_symbol(orig)->name);
+	arr_dimension_size(copy, 0, numConstant(ic));
+	return (copy);
+}
+
+
+/**
+ * Reproduces only the Declarator part of the original declaration; the
+ * special thing about this is that it takes care of arrays with missing
+ * size for the 1st dimension.
+ * 
+ * @param e  The symtab entry for the var whose declaratοr we want to reproduce
+ * @return   A declaration node (astdecl)
+ */
+astdecl xform_clone_declonly(stentry e)
+{
+	astdecl decl = ast_decl_copy(e->decl);
+	
+	if (e->isarray && arr_dimension_size(decl, 0, NULL) == NULL)
+	{
+		if (e->idecl)
+			fix_array_decl_copy(decl, e->idecl);
+		else
+			exit_error(2, "(%s, line %d): '%s' cannot be cloned; "
+			              "unknown dimension size\n", 
+			              e->decl->file->name, e->decl->l, e->key->name);
+	}
+	return (decl);
+}
+
+
+/**
+ * Reproduces the original declaration (optionally with a new variable name)
+ * which may optionally have an initializer and/or convert the variable into 
+ * a pointer.
  *
  * @todo "const" is not reproduced giving a warning
  *
- * @param s         The variable whose declaration we want to reproduce
- * @param initer    An optional initializer
- * @param mkpointer If true the variable will be declared as a pointer
- * @return          A statement with the declaration
+ * @param s       The variable whose declaration we want to reproduce
+ * @param initer  An optional initializer
+ * @param mkptr   If true the variable will be declared as a pointer
+ * @param snew    An optional new name for the variable
+ * @return        A statement with the declaration
  */
-inline aststmt xform_clone_declaration(symbol s, astexpr initer, bool mkpointer)
+inline aststmt 
+xform_clone_declaration(symbol s, astexpr initer, bool mkptr, symbol snew)
 {
-	stentry tmp  = symtab_get(stab, s, IDNAME);
-	astdecl decl = mkpointer ? xc_decl_topointer(ast_decl_copy(tmp->decl)) :
-	               ast_decl_copy(tmp->decl);
-	return (Declaration(
-	          ast_spec_copy_nosc(tmp->spec),
-	          initer ?
-	          InitDecl(
-	            decl,
-	            initer
-	          ) :
-	          decl
-	        )
+	stentry e    = symtab_get(stab, s, IDNAME);
+	astdecl decl = xform_clone_declonly(e);
+
+	if (snew)     /* Change the name */
+	{
+		astdecl id = IdentifierDecl(snew);
+		*(decl_getidentifier(decl)) = *id;
+		free(id);
+	}
+	if (mkptr)    /* Turn to pointer */
+		decl = decl_topointer(decl);
+	return Declaration(
+	         ast_spec_copy_nosc(e->spec),
+	         initer ? InitDecl(decl, initer) : decl
 	       );
 }
 
@@ -426,7 +446,7 @@ inline aststmt xform_clone_declaration(symbol s, astexpr initer, bool mkpointer)
  */
 inline aststmt xform_clone_funcdecl(symbol funcname)
 {
-	stentry func  = symtab_get(stab, funcname, FUNCNAME);
+	stentry func = symtab_get(stab, funcname, FUNCNAME);
 	assert(func != NULL);
 	return (Declaration(ast_spec_copy(func->spec), ast_decl_copy(func->decl)));
 }
@@ -488,18 +508,16 @@ void xform_master(aststmt *t)
 	 * compound) so as not to cause syntactic problems with a possibly
 	 * following "else" statement.
 	 */
-	*t = BlockList(
-	       BlockList(
-	         v,
-	         If( /* omp_get_thread_num() == 0 */
-	           BinaryOperator(
-	             BOP_eqeq,
-	             Call0_expr("omp_get_thread_num"),
-	             numConstant(0)
-	           ),
-	           s,
-	           NULL
-	         )
+	*t = Block3(
+	       v,
+	       If( /* omp_get_thread_num() == 0 */
+	         BinaryOperator(
+	           BOP_eqeq,
+	           Call0_expr("omp_get_thread_num"),
+	           numConstant(0)
+	         ),
+	         s,
+	         NULL
 	       ),
 	       linepragma(s->l + 1 - parisif, s->file)
 	     );
@@ -517,28 +535,176 @@ void xform_master(aststmt *t)
  */
 
 
+	/* OpenMP V4.5: doacross synchronization 
+	 */
+void xform_ordered_doacross(aststmt *t)
+{
+	aststmt   s = (*t)->u.omp->body, parent = (*t)->parent, 
+	          v = ompdir_commented((*t)->u.omp->directive);
+	ompclause cl;
+	ompcon    enclosing;
+	int       i, ordnum, ncla;
+	symbol    *indices;
+	astexpr   args, vec, initer;
+
+	/* Find enclosing #for and get its ordered clause parameter */
+	enclosing = ast_get_enclosing_ompcon((*t)->parent, 0);
+	if ((enclosing->type != DCFOR && enclosing->type != DCFOR_P) || 
+	    !(cl = xc_ompcon_get_clause(enclosing, OCORDEREDNUM)))
+		exit_error(1, "(%s, line %d) openmp error:\n\t"
+			"stand-alone ordered constructs should be closely nested in\n\t"
+			"doacross loops.\n",
+			(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+
+	/* Get loop nest depth */
+	ordnum = cl->subtype; 
+	if (ordnum <= 0)
+		exit_error(1, "(%s, line %d) openmp error:\n\t"
+			"ordered loop nest depth must be > 0.\n",
+			(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+
+	/* Get the depend clause(s) */
+	cl = xc_ompcon_get_clause((*t)->u.omp, OCDEPEND);
+	if (!cl)    /* impossible for stand-alone ordered (see parser.y) */
+		exit_error(1, "(%s, line %d) openmp error:\n\t"
+			"stand-alone ordered constructs should contain depend clause(s).\n",
+			(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+	if (cl->subtype != OC_source && cl->subtype != OC_sink)   /* impossible;  */
+		exit_error(1, "(%s, line %d) openmp error:\n\t"         /* see parser.y */
+			"stand-alone ordered constructs should contain depend(source) or\n\t"
+			"depend(sink: ) clause(s).\n",
+			(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+
+	/* Get the names of the loop nest indices (FIXME: we assume they are ints) */
+	indices = ompfor_get_indices(enclosing->body, ordnum);
+		
+	if (cl->subtype == OC_source)
+	{
+		args = Identifier(indices[0]);
+		for (i = 1; i < ordnum; i++)
+			args = CommaList(args, Identifier(indices[i]));
+		v = BlockList(
+					v,
+					FuncCallStmt(
+						IdentName("ort_doacross_post"), 
+						Comma2(
+							IdentName(DOACCPARAMS),
+							CastedExpr(         /* (long[]) { indices } */
+								Casttypename(
+									Declspec(SPEC_long),
+									AbstractDeclarator(
+										NULL,
+										ArrayDecl(NULL, NULL, NULL)
+									)
+								),
+								BracedInitializer(args)
+							)
+						)
+					)
+				);
+	}
+	else   /* sink */
+	{
+		initer = NULL;
+		ncla = 0;
+		cl = xc_ompcon_get_every_clause((*t)->u.omp, OCDEPEND);  /* memory leak */
+		do
+		{
+			ncla++;
+			vec = (cl->type == OCLIST) ? cl->u.list.elem->u.expr : cl->u.expr;
+			args = NULL;
+			for (i = 0; i < ordnum; i++)
+			{
+				if ((i != ordnum-1 && vec->type != COMMALIST) ||   /* sanity */
+						(i == ordnum-1 && vec->type == COMMALIST))
+					exit_error(1, "(%s, line %d) openmp error:\n\t"
+						"sink indices (%d) are %s than the doacrros loop indices (%d).\n",
+						(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,
+						i+1, (i == ordnum-1) ? "more" : "fewer", ordnum);
+				if (i != ordnum-1)
+				{
+					assert(vec->left->left->type == IDENT);
+					if (vec->left->left->u.sym != indices[i])
+						exit_error(1, "(%s, line %d) openmp error:\n\t"
+							"sink index '%s' does not correspond to loop index #%d (%s).\n",
+							(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,
+							vec->left->left->u.sym->name, i+1, indices[i]->name); 
+					args = args ? CommaList(args, ast_expr_copy(vec->left)) : ast_expr_copy(vec->left);
+					vec = vec->right;
+				}
+				else
+				{
+					assert(vec->left->type == IDENT);
+					if (vec->left->u.sym != indices[i])
+						exit_error(1, "(%s, line %d) openmp error:\n\t"
+							"sink index '%s' does not correspond to loop index #%d (%s).\n",
+							(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,
+							vec->left->u.sym->name, i+1, indices[i]->name); 
+					args = args ? CommaList(args, ast_expr_copy(vec)) : ast_expr_copy(vec);
+				}
+			}
+			initer = initer ? CommaList(initer, args) : args;
+			if (cl->type != OCLIST)
+				break;
+			else
+				cl = cl->u.list.next;
+		}
+		while (cl != NULL);
+		
+		v = BlockList(
+					v,
+					FuncCallStmt(
+						IdentName("ort_doacross_wait"), 
+						Comma3(
+							IdentName(DOACCPARAMS),
+							numConstant(ncla), 
+							CastedExpr(         /* (int[]) { deps } */
+								Casttypename(
+									Declspec(SPEC_long),
+									AbstractDeclarator(
+										NULL,
+										ArrayDecl(NULL, NULL, NULL)
+									)
+								),
+								BracedInitializer(initer)
+							)
+						)
+					)
+				);
+	}
+	free(indices);
+	ast_free(*t);
+	*t = v;
+	ast_stmt_parent(parent, *t);
+}
+
+
 void xform_ordered(aststmt *t)
 {
 	aststmt s = (*t)->u.omp->body, parent = (*t)->parent, v;
 	bool    stlist;   /* See comment above */
 
-	v = ompdir_commented((*t)->u.omp->directive); /* Put directive in comments */
+	if (OMPCON_IS_STANDALONE((*t)->u.omp))
+	{
+		xform_ordered_doacross(t);
+		return;
+	}
+	
+	/* Good ol' ORDERED */
 	stlist = ((*t)->parent->type == STATEMENTLIST ||
-	          (*t)->parent->type == COMPOUND);
+						(*t)->parent->type == COMPOUND);
 
+	v = ompdir_commented((*t)->u.omp->directive);
 	(*t)->u.omp->body = NULL;     /* Make it NULL so as to free t easily */
 	ast_free(*t);                 /* Get rid of the OmpStmt */
 
-	*t = BlockList(
-	       BlockList(
-	         BlockList(
-	           BlockList(v, Call0_stmt("ort_ordered_begin")),
-	           s
-	         ),
-	         Call0_stmt("ort_ordered_end")
-	       ),
-	       linepragma(s->l + 1 - (!stlist), s->file)
-	     );
+	*t = Block5(
+				v, 
+				Call0_stmt("ort_ordered_begin"),
+				s,
+				Call0_stmt("ort_ordered_end"),
+				linepragma(s->l + 1 - (!stlist), s->file)
+			);
 	if (!stlist)
 		*t = Compound(*t);
 	ast_stmt_parent(parent, *t);
@@ -565,31 +731,24 @@ void xform_critical(aststmt *t)
 	ast_free(*t);                /* Get rid of the OmpStmt */
 
 	if (!symbol_exists(lock))    /* Check for the lock */
-		newglobalvar(Declaration(Declspec(SPEC_void),   /* Don't use omp_lock_t */
-		                         Declarator(
-		                           Pointer(),
-		                           IdentifierDecl(Symbol(lock))
+		bld_globalvar_add(Declaration(Declspec(SPEC_void),   /* Don't use omp_lock_t */
+		                         InitDecl(
+		                           Declarator(
+		                             Pointer(),
+		                             IdentifierDecl(Symbol(lock))
+		                           ),
+		                           NullExpr()
 		                         )));
-	*t = BlockList(
-	       BlockList(
-	         BlockList(
-	           BlockList(
-	             v,
-	             Expression(   /* ort_critical_begin(&lock); */
-	               FunctionCall(
-	                 IdentName("ort_critical_begin"),
-	                 UOAddress(IdentName(lock))
-	               )
-	             )
-	           ),
-	           s
-	         ),
-	         Expression(   /* ort_critical_end(&lock); */
-	           FunctionCall(
-	             IdentName("ort_critical_end"),
-	             UOAddress(IdentName(lock))
-	           )
-	         )
+	*t = Block5(
+	       v,
+	       FuncCallStmt(   /* ort_critical_begin(&lock); */
+	         IdentName("ort_critical_begin"),
+	         UOAddress(IdentName(lock))
+	       ),
+	       s,
+	       FuncCallStmt(   /* ort_critical_end(&lock); */
+	         IdentName("ort_critical_end"),
+	         UOAddress(IdentName(lock))
 	       ),
 	       linepragma(s->l + 1 - (!stlist), s->file)
 	     );
@@ -615,19 +774,13 @@ void xform_taskgroup(aststmt *t)
 	(*t)->u.omp->body = NULL;    /* Make it NULL so as to free it easily */
 	ast_free(*t);                /* Get rid of the OmpStmt */
 
-	*t = BlockList(
-	       BlockList(
-	         BlockList(
-	           BlockList(
-	             v,
-	             Call0_stmt("ort_entering_taskgroup")
-	           ),
-	           s
-	         ),
-	         Labeled(
-	           Symbol(clabel), /* label used for cancel */
-	           Call0_stmt("ort_leaving_taskgroup")
-	         )
+	*t = Block5(
+	       v,
+	       Call0_stmt("ort_entering_taskgroup"),
+	       s,
+	       Labeled(
+	         Symbol(clabel), /* label used for cancel */
+	         Call0_stmt("ort_leaving_taskgroup")
 	       ),
 	       linepragma(s->l + 1 - (!stlist), s->file)
 	     );
@@ -675,28 +828,17 @@ void xform_atomic(aststmt *t)
 		      );
 		ex->right = IdentName("__tmp");
 		*t = Compound(
-		       BlockList(
-		         BlockList(
-		           BlockList(
-		             BlockList(BlockList(v, tmp), Call0_stmt("ort_atomic_begin")),
-		             s
-		           ),
-		           Call0_stmt("ort_atomic_end")
-		         ),
+		       Block6(
+		         v, tmp, Call0_stmt("ort_atomic_begin"), s,
+		         Call0_stmt("ort_atomic_end"),
 		         linepragma(s->l + 1 - (!stlist), s->file)
 		       )
 		     );
 	}
 	else
 	{
-		*t = BlockList(
-		       BlockList(
-		         BlockList(
-		           BlockList(v, Call0_stmt("ort_atomic_begin")),
-		           s
-		         ),
-		         Call0_stmt("ort_atomic_end")
-		       ),
+		*t = Block5(
+		       v, Call0_stmt("ort_atomic_begin"), s, Call0_stmt("ort_atomic_end"),
 		       linepragma(s->l + 1 - (!stlist), s->file)
 		     );
 		if (!stlist)
@@ -749,11 +891,9 @@ aststmt BarrierCall()
 	snprintf(mabel, 23, "CANCEL_taskgroup_%d", cur_taskgroup_line);
 	Switch(Call0_expr("ort_barrier_me"),
 	  Compound(
-	    BlockList(
-	      BlockList(
-	        Case(numConstant(0), Break()), 
-	        Case(numConstant(1), Goto(Symbol(label)))
-	      ),
+	    Block3(
+	      Case(numConstant(0), Break()), 
+	      Case(numConstant(1), Goto(Symbol(label))),
 	      Case(numConstant(2), Goto(Symbol(mabel)))
 	    )
 	  )
@@ -937,8 +1077,8 @@ void xform_cancellationpoint(aststmt *t)
 }
 
 
-/* See below for comments regarding the following func,
- * which declares fully all private-scope vars
+/* See below for comments regarding the following func, which declares 
+ * fully all private-scope vars.
  */
 static
 void declare_private_dataclause_vars(ompclause t)
@@ -956,19 +1096,22 @@ void declare_private_dataclause_vars(ompclause t)
 		case OCFIRSTPRIVATE:
 		case OCLASTPRIVATE:
 		case OCCOPYPRIVATE:
-		case OCREDUCTION:
 		case OCCOPYIN:
-		case OCMAP:
 			ast_declare_varlist_vars(t->u.varlist, t->type, t->subtype);
+			break;
+		case OCREDUCTION:
+		case OCMAP:
+			ast_declare_xlist_vars(t);
 			break;
 	}
 }
 
 
-/* We must first transform the body of the construct and then
+/**
+ * We must first transform the body of the construct and then
  * do the transformation of the construct itself (i.e. create new code
  * based on the clauses).
- * BUT, FOR CONSTRUCT WITH DATA CLAUSES:
+ * BUT, FOR CONSTRUCTS WITH DATA CLAUSES:
  *   before transforming the body, we have to *declare* (fully)
  *   all the identifiers in the clauses that have *private* scope,
  *   so that in the body those variables have the correct visibility.
@@ -981,6 +1124,7 @@ void declare_private_dataclause_vars(ompclause t)
  * are simply inserted in the symbol table for the correct visibility
  * of variables used in the body. The declarations are produced when
  * we transform the construct itself.
+ * @param t the openmp statement
  */
 static
 void xform_ompcon_body(ompcon t)
@@ -988,7 +1132,7 @@ void xform_ompcon_body(ompcon t)
 	if (t->body->type == COMPOUND && t->body->body == NULL)
 		return;      /* degenerate case */
 	
-	xc_validate_only_dataclause_vars(t->directive);
+	xc_validate_only_dataclause_vars(t->directive);  /* check for duplicates */
 	scope_start(stab);
 
 	/* If we are in a target data put __ort_denv in the symbol table, so that if
@@ -1066,7 +1210,7 @@ void ast_omp_xform(aststmt *t)
 			if (!empty_bodied_omp(t, "task"))
 			{
 				xform_ompcon_body((*t)->u.omp);
-				xform_task(t);
+				xform_task(t, taskoptLevel);
 			}
 			break;
 		case DCTASKGROUP:
@@ -1155,24 +1299,24 @@ void ast_omp_xform(aststmt *t)
 
 			cur_parallel_line = (*t)->l;
 			cur_taskgroup_line = 0; /* New team => forget old taskgroups */
-			/*******************************/
-			/*          Agelos             */
-			/*******************************/
-			/* If it's already analyzed, do nothing.
-			 * Else perform the analysis */
-			/* TODO: add when bug fixed
-			if (isInAutoList(cur_parallel_line) == NULL)
-				dfa_analyse(*t);
-			*/
-			/*******************************/
-			/*                             */
-			/*******************************/
+			if (enableAutoscope)
+				/*******************************/
+				/*          Agelos             */
+				/*******************************/
+				/* If it's already analyzed, do nothing.
+				* Else perform the analysis */
+				if (dfa_parreg_get_results(cur_parallel_line) == NULL)
+					dfa_analyse(*t);
+				/*******************************/
+				/*                             */
+				/*******************************/
 
 			closest_parallel_scope = stab->scopelevel;
 			xform_ompcon_body((*t)->u.omp);
 			xform_parallel(t, combined);     /* Now do the actual transformation */
 
-			dfa_removeFromAutoList(cur_parallel_line);
+			if (enableAutoscope)
+				dfa_parreg_remove(cur_parallel_line);
 
 			closest_parallel_scope = savescope;
 			cur_parallel_line = savecpl;
@@ -1183,6 +1327,7 @@ void ast_omp_xform(aststmt *t)
 		{
 			int savecpl   = cur_parallel_line;
 			int savectgl  = cur_taskgroup_line;
+			targstats_t *ts = NULL; /* Only for CARS */
 
 			if (empty_bodied_omp(t, "target"))
 				break;
@@ -1194,18 +1339,18 @@ void ast_omp_xform(aststmt *t)
 			#define CHECKTARGET(TYPE) do {\
 			if (inTarget())\
 				exit_error(1, "(%s, line %d) openmp error:\n\t"\
-				           TYPE " in target leads to undefined behavior\n",\
+				           TYPE " within a target leads to undefined behavior\n",\
 				           (*t)->u.omp->directive->file->name,\
 				           (*t)->u.omp->directive->l);\
 			\
 			if (inDeclTarget)\
 				exit_error(1, "(%s, line %d) openmp error:\n\t"\
-				           TYPE " in declare target leads to undefined behavior\n",\
+				         TYPE " within a declare target leads to undefined behavior\n",\
 				           (*t)->u.omp->directive->file->name,\
 				           (*t)->u.omp->directive->l);\
 			} while(0)
 
-			CHECKTARGET("Target");
+			CHECKTARGET("target");
 
 			/* We add the comment to mark that we are in a "target".
 			 * If outline is called while we transform the body it's code will
@@ -1213,47 +1358,65 @@ void ast_omp_xform(aststmt *t)
 			 */
 			targtree = verbit("");    /* Dummy */
 
-			cars_analyze_target((*t)->u.omp->body);  /* Before any transformations */  
+			if (analyzeKernels)         /* Before any transformations */
+				ts = cars_analyze_target((*t)->u.omp->body);  
 
 			xform_ompcon_body((*t)->u.omp);
-			xform_target(t);
-
+			xform_target(t, ts);
+ 
 			cur_parallel_line = savecpl;
 			cur_taskgroup_line = savectgl;
 			break;
 		}
 		case DCTARGETDATA:
 		{
+			int bak;
+			
 			if (empty_bodied_omp(t, "target data"))
 				break;
 
-			CHECKTARGET("Target data");
+			CHECKTARGET("target data");
 
 			/* We store the scope level of the target data and use it later in
 			 * xform_ompcon_body -> declare_private_dataclause_vars to set
 			 * isindevenv
 			 */
+			bak = target_data_scope;  /* backup */
 			target_data_scope = stab->scopelevel;
 
 			xform_ompcon_body((*t)->u.omp);
 			xform_targetdata(t);
 
-			target_data_scope = -1;
+			target_data_scope = bak;  /* restore */
 			break;
 		}
 		case DCTARGETUPD:
 		{
-			CHECKTARGET("Target update");
-			#undef CHECKTARGET
+			CHECKTARGET("target update");
 			xform_targetupdate(t);
 			break;
 		}
+		case DCTARGENTERDATA:
+			CHECKTARGET("target enter data");
+			xform_targetenterdata(t);
+			break;
+		case DCTARGEXITDATA:
+			CHECKTARGET("target exit data");
+			#undef CHECKTARGET
+			xform_targetexitdata(t);
+			break;
 		case DCDECLTARGET:
 		{
-			inDeclTarget = true;
-			ast_stmt_xform(&((*t)->u.omp->body));     /* First transform the body */
+			if (!(*t)->u.omp->directive->clauses)     /* Old (v4.0) style */
+			{ 
+				if (empty_bodied_omp(t, "declare target"))
+					break;
+				
+				inDeclTarget++;
+				ast_stmt_xform(&((*t)->u.omp->body));   /* First transform the body */
+				inDeclTarget--;
+			}
 			xform_declaretarget(t);
-			inDeclTarget = false;
 			break;
 		}
 		case DCCANCEL:
@@ -1261,6 +1424,12 @@ void ast_omp_xform(aststmt *t)
 			break;
 		case DCCANCELLATIONPOINT:
 			xform_cancellationpoint(t);
+			break;
+		case DCTEAMS:
+			xform_teams(t);
+			break;
+		case DCTARGETTEAMS:
+			xform_targetteams(t);
 			break;
 		default:
 			fprintf(stderr, "WARNING: %s directive not implemented\n",
@@ -1273,213 +1442,24 @@ void ast_omp_xform(aststmt *t)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                               *
- *     THE LIST OF THREAD FUNCTIONS                              *
- *                                                               *
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
-
-/* All produced thread functions are inserted in this LIFO list.
- * They are transformed seperately and each one gets inserted in the AST,
- * just before the function that created it. The LIFO way guarantees
- * correct placement of nested threads.
- * The whole code here is based on the assumption that the FUNCDEF nodes
- * in the original AST won't change (which does hold since the
- * transformation code---see above---only transforms the body of the FUNCDEF,
- * not the FUNCDEF code itself). Otherwise the ->fromfunc pointers might
- * point to invalid nodes.
- */
-typedef struct funclist_ *funclist;
-struct funclist_
-{
-	aststmt  funcdef;        /* The thread/task function */
-	aststmt  fromfunc;       /* Must be placed after this function */
-	symbol   fname;          /* The name of the thread/task function */
-	funclist next;
-};
-static funclist thrfuncs = NULL;
-
-
-/* New funcs are inserted @ front */
-void xform_add_threadfunc(symbol name, aststmt fd, aststmt curfunc)
-{
-	funclist e   = (funclist) smalloc(sizeof(struct funclist_));
-	e->fname     = name;
-	e->funcdef   = fd;
-	e->fromfunc  = curfunc;
-	e->next      = thrfuncs;
-	thrfuncs     = e;
-}
-
-
-/* Takes the list with the produced thread functions (from xform_parallel()),
- * and transforms them. Notice that no new thread functions can be added here
- * since before a parallel construct is transformed, all nested constructs
- * have already been transformed (so there will be no #parallel in any
- * of the functions here).
- */
-static
-void xform_thread_functions(funclist l)
-{
-	if (l != NULL)
-	{
-		ast_stmt_xform(&(l->funcdef));
-		if (l->next != NULL)
-			xform_thread_functions(l->next);
-	}
-}
-
-
-static
-void place_thread_functions(funclist l)
-{
-	aststmt neu, bl;
-
-	if (l == NULL) return;
-
-	/* Replace l->fromfunc by a small BlockList; notice that anything pointing
-	 * to the same func will now "see" this new blocklist.
-	 *   ----> (pfunc) now becomes
-	 *
-	 *   ---> (BL) -----------> (BL2) --> (thrfunc)
-	 *         \                   \
-	 *          -->(thrfunc decl)   -->(pfunc)
-	 */
-	neu = (aststmt) smalloc(sizeof(struct aststmt_));
-	*neu = *(bl = l->fromfunc);                     /* new node for pfunc */
-	*(bl) = *BlockList(                             /* BL */
-	          Declaration(                          /* thrfunc decl */
-	            Speclist_right(StClassSpec(SPEC_static), Declspec(SPEC_void)),
-	            Declarator(
-	              Pointer(),
-	              FuncDecl(
-	                IdentifierDecl(l->fname) ,
-	                ParamDecl(
-	                  Declspec(SPEC_void),
-	                  AbstractDeclarator(
-	                    Pointer(),
-	                    NULL
-	                  )
-	                )
-	              )
-	            )
-	          ),
-	          BlockList(neu, l->funcdef)  /* BL2 */
-	        );
-	bl->parent         = neu->parent;   /* Parentize (BL) */
-	neu->parent        = bl->body;      /* pfuncs's parent */
-	l->funcdef->parent = bl->body;      /* thrfunc's parent */
-	bl->u.next->parent = bl;            /* Declarations's parent */
-	bl->body->parent   = bl;            /* BL2's parent */
-	bl->file           = NULL;
-	bl->u.next->file   = NULL;
-	bl->body->file     = NULL;
-	l->funcdef->file   = NULL;
-
-	if (l->next != NULL)
-		place_thread_functions(l->next);
-	free(l);    /* No longer needed */
-}
-
-
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- *                                                               *
  *     TRANSFORM THE AST (ITS OPENMP NODES)                      *
  *                                                               *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
-aststmt place_globals(aststmt tree)
-{
-	aststmt p;
-
-	if (testingmode)
-	{
-		/* Just place them at the very beginning;
-		 * it is guaranteed that the tree begins with a statementlist.
-		 */
-		for (p = tree; p->type == STATEMENTLIST; p = p->u.next)
-			;               /* Go down to the leftmost leaf */
-		p = p->parent;    /* Up to parent */
-		p->u.next = BlockList(p->u.next, newglobals);
-		p->u.next->parent       = p;           /* Parentize correctly */
-		p->u.next->body->parent = p->u.next;
-		newglobals->parent      = p->u.next;
-		return (tree);
-	}
-
-	/* We put all globals right after __ompi_defs__'s declaration
-	 * (see bottom of ort.defs).
-	 */
-	if (tree->type == STATEMENTLIST)
-	{
-		if ((p = place_globals(tree->u.next)) != NULL)
-			return (p);
-		else
-			return (place_globals(tree->body));
-	}
-
-	/* Try to find where __ompi_defs__ is declared. */
-	if (tree->type == DECLARATION &&
-	    tree->u.declaration.decl != NULL &&
-	    decl_getidentifier(tree->u.declaration.decl)->u.id ==
-	    Symbol("__ompi_defs__"))
-	{
-		p = smalloc(sizeof(struct aststmt_));
-		*p = *tree;
-		if (cppLineNo)
-			*tree = *BlockList(
-			          p,
-			          BlockList(
-			            verbit("# 1 \"%s-newglobals\"", filename),
-			            BlockList(
-			              newglobals,
-			              verbit("# 1 \"%s\"", filename)
-			            )
-			          )
-			        );
-		else
-			*tree = *BlockList(p, newglobals);
-		tree->parent = p->parent;
-		p->parent = tree;
-		newglobals->parent = tree;
-		return (tree);
-	}
-	return (NULL);
-}
-
-
 void ast_xform(aststmt *tree)
 {
-	newglobals = NULL;
-	thrfuncs   = NULL;
-	newtail    = NULL;
-
-	if (__has_target)
+	if (__has_target && analyzeKernels)
 		cars_analyze_declared_funcs(*tree);   /* CARS analysis */
 	
-	ast_stmt_xform(tree);
+	decltarg_find_all_directives(*tree);    /* Get all #declare target ids */
 
-	xform_thread_functions(thrfuncs);  /* xform & add the new thread/task funcs */
-	place_thread_functions(thrfuncs);  /* place them wisely */
-	thrfuncs = NULL;
+	ast_stmt_xform(tree);     /* Core */
 
-	sgl_fix_sglvars(); /* Called before adding the tail, since it adds
-                        something to it */
-
-	produce_decl_var_code(); /* Adds to globals and tail */
-
-	if (tree != NULL && newglobals != NULL) /* Add the new globals */
-	{
-		//    ast_stmt_xform(&newglobals);          /* Must do it ! (why??) */
-		place_globals(*tree);
-	}
-
-	if (tree != NULL && newtail != NULL)    /* Append @ bottom */
-		/* Cannot do ast_stmt_xform(&newtail). See x_shglob.c */
-		*tree = BlockList(*tree, newtail);
-
-	if (newglobals != NULL)
-		newglobals = NULL;
-	if (newtail != NULL);
-	newtail = NULL;
+	bld_outfuncs_xform();     /* Transform & add the new thread/task funcs */
+	bld_outfuncs_place();     /* Place them wisely */
+	sgl_fix_sglvars();        /* Adds something to the tail */
+	produce_decl_var_code();  /* Adds to globals and tail */
+	bld_ctors_build();        /* Autoinits */
+	bld_headtail_place(tree); /* Finish up the tree */
 }

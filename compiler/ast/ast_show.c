@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_show.c -- prints out the tree; makes it look good, too. */
@@ -191,6 +191,29 @@ void ast_stmt_labeled_show(aststmt tree)
 }
 
 
+void ast_asmop_show(asmop op)
+{
+	if (!op->constraint)   /* a list */
+	{
+		ast_asmop_show(op->op);
+		printf(", ");
+		ast_asmop_show(op->next);
+	}
+	else
+	{
+		if (op->symbolicname)
+		{
+			printf("[");
+			ast_expr_show(op->symbolicname);
+			printf("]");
+		}
+		printf(" %s(", op->constraint);
+		ast_expr_show(op->var);
+		printf(")");
+	}
+}
+
+
 void ast_stmt_show(aststmt tree)
 {
 	if (tree->file != NULL && tree->file != _curfile)
@@ -296,6 +319,50 @@ void ast_stmt_show(aststmt tree)
 			break;
 		case VERBATIM:
 			printf("%s\n", tree->u.code);
+			break;
+		case ASMSTMT:
+			printf("__asm__ ");
+			if (tree->u.assem->qualifiers)
+			{
+				ast_spec_show(tree->u.assem->qualifiers);
+				printf(" ");
+			}
+			if (tree->subtype == SGOTO)
+				printf("goto ");
+			printf("(%s", tree->u.assem->template);
+			if (tree->subtype == SXTENDED)
+			{
+				if (tree->u.assem->outs || tree->u.assem->ins || tree->u.assem->clobbers)
+				{
+					printf(" : ");
+					if (tree->u.assem->outs)
+						ast_asmop_show(tree->u.assem->outs);
+				}
+				if (tree->u.assem->ins || tree->u.assem->clobbers)
+				{
+					printf(" : ");
+					if (tree->u.assem->ins)
+						ast_asmop_show(tree->u.assem->ins);
+				}
+				if (tree->u.assem->clobbers)
+				{
+					printf(" : ");
+					ast_expr_show(tree->u.assem->clobbers);
+				}
+			}
+			if (tree->subtype == SGOTO)
+			{
+				printf(" : : "); 
+				if (tree->u.assem->ins)
+					ast_asmop_show(tree->u.assem->ins);
+				printf(" : ");
+				if (tree->u.assem->clobbers)
+					ast_expr_show(tree->u.assem->clobbers);
+				printf(" : ");
+				if (tree->u.assem->labels)
+					ast_expr_show(tree->u.assem->labels);
+			}
+			printf(")\n");
 			break;
 		case OX_STMT:
 			ast_oxcon_show(tree->u.ox);
@@ -422,7 +489,7 @@ void ast_expr_show(astexpr tree)
 			ast_expr_show(tree->right);
 			break;
 		default:
-			fprintf(stderr, "[ast_expr_show]: b u g !!\n");
+			fprintf(stderr, "[ast_expr_show]: b u g (type=%d)!!\n", tree->type);
 	}
 }
 
@@ -445,6 +512,11 @@ void ast_spec_show(astspec tree)
 					printf("enum");
 					if (tree->name)
 						printf(" %s", tree->name->name);
+					if (tree->sueattr)
+					{
+						printf(" ");
+						ast_spec_show(tree->sueattr);
+					}
 					if (tree->body)
 					{
 						printf(" {\n");
@@ -457,7 +529,12 @@ void ast_spec_show(astspec tree)
 					break;
 				case SPEC_struct:
 				case SPEC_union:
-					printf("%s", tree->subtype == SPEC_struct ? "struct" : "union");
+					printf(tree->subtype == SPEC_struct ? "struct" : "union");
+					if (tree->sueattr)
+					{
+						printf(" ");
+						ast_spec_show(tree->sueattr);
+					}
 					if (tree->name)
 						printf(" %s", tree->name->name);
 					if (tree->u.decl)
@@ -504,6 +581,9 @@ void ast_spec_show(astspec tree)
 				default:
 					fprintf(stderr, "[ast_spec_show]: list b u g !!\n");
 			}
+			break;
+		case ATTRSPEC:
+			printf("__attribute__(( %s ))", tree->u.txt ? tree->u.txt : "");
 			break;
 		default:
 			fprintf(stderr, "[ast_spec_show]: b u g !!\n");
@@ -643,6 +723,39 @@ void ast_decl_show(astdecl tree)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
+static void ast_omparrdim_show(omparrdim d)
+{
+	printf("[");
+	ast_expr_show(d->lb);
+	printf(" : ");
+	if (d->len)
+		ast_expr_show(d->len);
+	printf("]");
+}
+
+
+static void ast_ompxlione_show(ompxli xl)
+{
+	omparrdim s;
+	
+	printf("%s", xl->id->name);
+	if (xl->xlitype == OXLI_ARRSEC)
+		for (s = xl->dim; s; s = s->next)
+			ast_omparrdim_show(s);
+}
+
+
+static void ast_ompxli_show(ompxli xl)
+{
+	for (; xl; xl = xl->next)
+	{
+		ast_ompxlione_show(xl);
+		if (xl->next) printf(", ");
+	}
+	fflush(stdout);
+}
+
+
 void ast_ompclause_show(ompclause t)
 {
 	if (t->type == OCLIST)
@@ -659,25 +772,62 @@ void ast_ompclause_show(ompclause t)
 	switch (t->type)
 	{
 		case OCIF:
+			if (t->modifier != OCM_none)
+				printf("(%s: ", clausemods[t->modifier]);
+			else
+				printf("("); 
+			ast_expr_show(t->u.expr); printf(")");
+			break;
 		case OCFINAL:
 		case OCNUMTHREADS:
 		case OCDEVICE:
-			printf("( "); ast_expr_show(t->u.expr); printf(" )");
+		case OCNUMTEAMS:
+		case OCTHREADLIMIT:
+		case OCHINT:
+		case OCPRIORITY:
+			printf("("); ast_expr_show(t->u.expr); printf(")");
 			break;
 		case OCSCHEDULE:
-			printf("( %s%s", clausesubs[t->subtype], t->u.expr ? ", " : " ");
+			printf("(");
+			if (t->modifier != OCM_none)
+				printf("%s:", clausemods[t->modifier]);
+			printf("%s%s", clausesubs[t->subtype], t->u.expr ? ", " : " ");
 			if (t->u.expr)
 				ast_expr_show(t->u.expr);
-			printf(" )");
+			printf(")");
 			break;
 		case OCDEFAULT:
 		case OCPROCBIND:
-			printf("( %s )", clausesubs[t->subtype]);
+			printf("(%s)", clausesubs[t->subtype]);
 			break;
-		case OCMAP:
+		case OCDEPEND:
+			if (t->subtype == OC_sink)
+			{
+				printf("(%s: ", clausesubs[t->subtype]);
+				if (t->u.expr)
+					ast_expr_show(t->u.expr);
+				printf(")");
+				break;
+			}
+			if (t->subtype == OC_source)
+			{
+				printf("(%s)", clausesubs[t->subtype]);
+				break;
+			}
 		case OCREDUCTION:
-			printf("( %s: ", clausesubs[t->subtype]);
-			ast_decl_show(t->u.varlist);
+		case OCMAP:
+			if (t->modifier != OCM_none)
+				printf("(%s,%s:  ", clausemods[t->modifier], clausesubs[t->subtype]);
+			else
+				printf("(%s: ", clausesubs[t->subtype]);
+			ast_ompxli_show(t->u.xlist);
+			printf(")");
+			break;
+		case OCTO:
+		case OCFROM:
+		case OCLINK:
+			printf("(");
+			ast_ompxli_show(t->u.xlist);
 			printf(")");
 			break;
 		case OCCOPYIN:
@@ -686,8 +836,8 @@ void ast_ompclause_show(ompclause t)
 		case OCFIRSTPRIVATE:
 		case OCLASTPRIVATE:
 		case OCSHARED:
-		case OCTO:
-		case OCFROM:
+		case OCISDEVPTR:
+		case OCUSEDEVPTR:
 		case OCAUTO:
 			printf("("); ast_decl_show(t->u.varlist); printf(")");
 			break;
@@ -699,8 +849,10 @@ void ast_ompclause_show(ompclause t)
 		case OCSECTIONS:
 		case OCFOR:
 		case OCTASKGROUP:
+		case OCDEFAULTMAP:
 			break;
 		case OCCOLLAPSE:
+		case OCORDEREDNUM:
 			printf("(%d)", t->subtype);
 			break;
 	}
@@ -714,7 +866,11 @@ void ast_ompdir_show(ompdir t)
 	{
 		case DCCRITICAL:
 			if (t->u.region)
+			{
 				printf("(%s)", t->u.region->name);
+				if (t->clauses)
+					ast_ompclause_show(t->clauses);
+			}
 			break;
 		case DCFLUSH:
 			if (t->u.varlist)
@@ -749,8 +905,8 @@ void ast_ompcon_show(ompcon t)
 		indent();
 		ast_stmt_show(t->body);
 	}
-	if (t->directive->type == DCDECLTARGET)
-		printf("#pragma omp end %s", ompdirnames[t->type]);
+	if (t->type == DCDECLTARGET && t->body)  /* v4.0 style */
+		printf("#pragma omp end %s\n", ompdirnames[t->type]);
 }
 
 
@@ -764,15 +920,16 @@ void ast_show(aststmt tree)
 static void show_stderr(void *tree, void (*func)(void *))
 {
 	int backup = dup(1);     /* duplicate stdout */
+	
+	fflush(stdout);          /* drain it */
 	dup2(2, 1);              /* stderr to stdout */
 
 	func(tree);
 
-	fflush(stdout);          /* printf("\n"); */
+	fflush(stdout);          /* drain */
 
 	dup2(backup, 1);         /* restore stdout */
 	close(backup);
-
 }
 
 void ast_expr_show_stderr(astexpr tree)
@@ -799,9 +956,21 @@ void ast_show_stderr(aststmt tree)
 }
 
 
+void ast_ompdir_show_stderr(ompdir tree)
+{
+	show_stderr(tree, (void (*)(void *)) ast_ompdir_show);
+}
+
+
 void ast_ompclause_show_stderr(ompclause tree)
 {
 	show_stderr(tree, (void (*)(void *)) ast_ompclause_show);
+}
+
+
+void ast_ompxli_show_stderr(ompxli tree)
+{
+	show_stderr(tree, (void (*)(void *)) ast_ompxlione_show);
 }
 
 
@@ -839,9 +1008,14 @@ void ast_oxclause_show(oxclause t)
 			break;
 		case OX_OCATNODE:
 		case OX_OCATWORKER:
+		case OX_OCIF:
+		case OX_OCHINTS:
 		case OX_OCSTART:
 		case OX_OCSTRIDE:
 			printf("("); ast_expr_show(t->u.expr); printf(")");
+			break;
+		case OX_OCLOCAL:
+		case OX_OCREMOTE:
 			break;
 		case OX_OCSCOPE:
 			printf("scope(%s)", t->u.value == OX_SCOPE_NODES ? "nodes" :

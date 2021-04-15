@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ORT_PRIVE.H
@@ -32,6 +32,7 @@
 #include "ort_defs.h"
 #include <ee.h>
 
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                       *
  *  CONSTANTS AND MACROS                                 *
@@ -45,12 +46,10 @@
  * nowait regions so we don't choose a huge number (so as to not occupy
  * too much space).
  */
-#define _OMP_SINGLE   0        /* Workshare types */
+#define _OMP_SINGLE   0         /* Workshare types */
 #define _OMP_SECTIONS 1
 #define _OMP_FOR      2
 
-#define CANCEL_ACTIVATED 1
-#define ENV_CANCEL_ACTIVATED 1
 
 #if defined(EE_TYPE_PROCESS)
 
@@ -69,6 +68,9 @@
 	#define ee_create            oprc_create
 	#define ee_yield             oprc_yield
 	#define ee_waitall           oprc_waitall
+	#define ee_bindme            oprc_bindme
+	#define ee_getselfid         oprc_getselfid
+	#define ee_getself           oprc_getself
 
 	#define ee_lock_t            oprc_lock_t
 	#define ee_init_lock         oprc_init_lock
@@ -97,12 +99,15 @@
 	#define ee_getspecific       othr_getspecific
 	#define ee_setspecific       othr_setspecific
 
-	#define ee_initialize        othr_initialize
-	#define ee_finalize          othr_finalize
-	#define ee_request           othr_request
-	#define ee_create            othr_create
-	#define ee_yield             othr_yield
-	#define ee_waitall           othr_waitall
+	#define ee_initialize         othr_initialize
+	#define ee_finalize           othr_finalize
+	#define ee_request            othr_request
+	#define ee_create             othr_create
+	#define ee_yield              othr_yield
+	#define ee_waitall            othr_waitall
+	#define ee_bindme             othr_bindme
+	#define ee_getselfid          othr_getselfid
+	#define ee_getself            othr_getself
 
 	#define ee_lock_t            othr_lock_t
 	#define ee_init_lock         othr_init_lock
@@ -173,6 +178,8 @@
 	}
 
 #define testnotset(X) if((X)==0) {(X)=1; FENCE;}
+
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                       *
  *  TYPES                                                *
@@ -208,6 +215,7 @@
 #define TASKPOOLSIZE(X) (TASKQUEUESIZE+(X)+3)
 #define atomic_read(X) *((int*)X)
 
+
 #if !defined(AVOID_OMPI_DEFAULT_TASKS)
 
 struct half_node
@@ -216,7 +224,7 @@ struct half_node
 	struct Node     *parent;             /* Task's parent id */
 	volatile struct Node *next;          /* For use in garbage collector */
 	int             isfinal;             /* OpenMP 3.1 */
-	int             taskgroup;           /* OpenMP 4.0.0 */
+	int             taskgroup;           /* OpenMP 4.0 */
 #if !defined(HAVE_ATOMIC_FAA)
 	ee_lock_t     lock;                /* Lock queue for atomic access */
 #endif
@@ -235,20 +243,23 @@ typedef struct Node
 	void            *(*func)(void *);    /* Task function */
 	struct Node     *parent;             /* Task's parent id */
 	struct Node     *next;               /* For use in garbage collector */
-	int             isfinal;             /* OpenMP 3.1 */
-	taskgroup_t     *taskgroup;          /* OpenMP 4.0.0 */
+	int              isfinal;            /* OpenMP 3.1 */
+	taskgroup_t     *taskgroup;          /* OpenMP 4.0 */
 #if !defined(HAVE_ATOMIC_FAA)
-	ee_lock_t     lock;                /* Lock queue for atomic access */
+	ee_lock_t        lock;               /* Lock queue for atomic access */
 #endif
 
 	/* Padding here... */
-	char pad[CHAR_PAD_CACHE(sizeof(struct half_node))];
-	void            *funcarg;            /* Task function argument */
-	volatile int     num_children;        /* Number of task's descendants*/
+	char             pad[CHAR_PAD_CACHE(sizeof(struct half_node))];
+	void            *funcarg;        /* Task function argument */
+	volatile int     num_children;   /* Number of task's descendants*/
 	/* Check out whether i inherited task node from my father */
-	int inherit_task_node;
-	volatile int    occupied;
-	ort_task_icvs_t  icvs;                /* OpenMP3.0 */
+	int              inherit_task_node;
+	volatile int     occupied;
+	int              rtid;           /* Special task id (nested loop to task) */
+	ort_task_icvs_t  icvs;           /* OpenMP3.0 */
+
+	void            *dependencies;   /* OpenMP 4.0 task dependencies (opaque) */
 } ort_task_node_t;
 
 
@@ -295,7 +306,7 @@ typedef struct
 	int max_children;
 	/* If tasks are left to be done from the members of my group */
 	volatile int never_task;
-	/* OpenMP 4.0.0 Used to identify closely nested implicit task */
+	/* OpenMP 4.0 Used to identify closely nested implicit task */
 	ort_task_node_t *current_implicit_task;
 #ifdef ORT_DEBUG
 	long tasks_enqueued;
@@ -310,8 +321,8 @@ typedef struct
 	long throttled_if;          /*    .. due to if(FALSE) clause */
 	long throttled_final;       /*    .. due to final(TRUE) clause */
 	long throttled_serial;      /*    .. outside of parallel */
-	long in_throttle;           /* # tha i got in throttle */
-	long out_throttle;          /* # tha i got out of throttle */
+	long in_throttle;           /* # times i got in throttling mode */
+	long out_throttle;          /* # times i got out of throttling */
 	long fail_theft_attemts;    /* # times tried to steal from empty queue */
 #endif
 } ort_tasking_t;
@@ -328,29 +339,33 @@ typedef struct
 
 #endif
 
+
 /*
  * Other types
  */
 
 
-/* Ordered data. */
-typedef struct
-{
-	int       next_iteration;  /* Low bound of the chunk that should be next */
-	ee_lock_t lock;
-} ort_ordered_info_t;
-
+/* Doacross loops configuration:
+ * !DOACROSS_FAST: lowest memory requirements, only works for static schedules
+ *  DOACROSS_FAST: fastest, works for all schedules, high memory consumption
+ */
+#define DOACROSS_FAST
 
 /* For FOR loops */
 typedef struct
 {
-	/* lb is initialized to the loop's initial lower bound. During execution,
-	 * it represents the "current" lower bound, i.e. the next iteration to be
-	 * scheduled.
-	 * *** IT IS ONLY USED FOR THE GUIDED & DYNAMIC SCHEDULES ***
-	 */
-	volatile int       iter;          /* The next iteration to be scheduled */
-	ort_ordered_info_t ordering;      /* Bookeeping for the ORDERED clause */
+	int  hasordered;                /* flag for plain ordered clause */                  
+	int  ordnum;                    /* ordered(num) - only used for doacross */
+	int  colnum;                    /* collapse(num) - ditto */
+	int  niters;                    /* total # iterations (after collapsing) */
+	volatile u_long iter;           /* The next iteration to be scheduled */
+	volatile u_long *curriter;      /* Current iteration for each child */
+#ifdef DOACROSS_FAST
+	volatile unsigned int *mapit;   /* Doacross iteration bitmap */
+#else
+	int  schedtype;
+	int  chsize;
+#endif
 } ort_forloop_t;
 
 
@@ -375,7 +390,7 @@ typedef struct
 	wsregion_t blocking;
 	/* This is for keeping track of active NOWAIT regions.  */
 	volatile int headregion, tailregion;   /* volatile since all threads watch */
-	wsregion_t active[MAXACTIVEREGIONS];
+	wsregion_t active[MAX_ACTIVE_REGIONS];
 } ort_workshare_t;
 
 
@@ -397,14 +412,13 @@ typedef struct
 } ort_tptable_t;
 
 
-/* Execution entity control block (eecb).
- * ORT keeps such a block for every ee; it contains fields necessary
- * for runtime bookkeeping.
- * The eecb's form a tree, where child ee's have pointers to their
- * parent's eecb.
+/* Master Control Block Fields (MCBF).
+ * Contains the fields used when acting as a master thread.
+ * These fields were previously in ort_eecb_t.
  */
 typedef struct ort_eecb_s ort_eecb_t;
-struct ort_eecb_s
+typedef struct ort_mcbf_s ort_mcbf_t;
+struct ort_mcbf_s
 {
 	/*
 	 * The barrier is declared first, hoping it will be cache aligned
@@ -412,8 +426,8 @@ struct ort_eecb_s
 
 	/* First, the fields used by my children (when I am the parent)
 	 */
-	ee_barrier_t    barrier;                         /* Barrier for my children */
-	int             have_created_team;  /* 1 if I was a team parent in the past */
+	ee_barrier_t    *barrier;                        /* Barrier for my children */
+	void            *redinfo;              /* Reduction data/results of my kids */
 	int             num_children;
 	void            *(*workfunc)(void *);   /* The func executed by my children */
 	ort_workshare_t workshare;     /* Some fields volatile since children snoop */
@@ -422,33 +436,49 @@ struct ort_eecb_s
 	ort_tptable_t   *tpkeys;               /* Threadprivate vars of my children */
 	int             tpksize;         /* in essence, max # children ever created */
 	ort_eecb_t      *me_master;      /* For use when i become master of a group */
-	volatile int    cancel_parallel;         /* Cancel flags in parallel region */
-	volatile int    cancel_sections;
-	volatile int    cancel_for ;
-	taskgroup_t     *tg_recycler;                         /* Taskgroup recycler */
+	volatile int    cancel_par_active;           /* Flags to signal cancelation */
+	volatile int    cancel_sec_active;
+	volatile int    cancel_for_active;
+
+	omp_proc_bind_t bind_override;    /* _false when no proc_bind clause exists */
+};
+
+
+/* Execution entity control block (eecb).
+ * ORT keeps such a block for every ee; it contains fields necessary
+ * for runtime bookkeeping.
+ * The eecb's form a tree, where child ee's have pointers to their
+ * parent's eecb.
+ */
+struct ort_eecb_s
+{
+	/* First, the fields used by my children (when I am the parent)
+	 */
+	ort_mcbf_t *mf;
+
 	/* Fields for me, as a member of a team
 	 */
-	ort_eecb_t *parent;
+	ort_eecb_t *parent;          /* this is also used for recycling freed EECBs */
 
-
-	int cancel_sections_me;                    /* Cancel flags in serial region */
+	int cancel_sec_me;                         /* Cancel flags in serial region */
 	int cancel_for_me;
 	int thread_num;                                /* Thread id within the team */
 	int num_siblings;                                   /* # threads in my team */
 	int level;                            /* At what level of parallelism I lie */
 	int activelevel;             /* At what *active* level of parallelism I lie */
 	void *shared_data;          /* Pointer to shared struct of current function */
-	ort_eecb_t *sdn;      /* Where I will get shared data from; normally
+	ort_eecb_t *sdn;            /* Where I will get shared data from; normally
                                    from my parent, except at a false parallel
                                    where I get it from myself since I am
                                    the only thread to execute the region. */
+	ort_eecb_t *me_partask;              /* When i run a task from parallel for */
 	int mynextNWregion;        /* Non-volatile; I'm the only thread to use this */
-	int chunklb;             /* Non-volatile; my current chunk's first and last */
-	int chunkub;           /* iterations; change for each chunk i execute through
-                          ort_thischunk_range(); only used in ordered_begin() */
 	int nowaitregion;             /*  True if my current region is a NOWAIT one */
+	int currplace; /* The place I'm currently executing (place_partition index) */
+	int pfrom, pto;                      /* Current place subpartition interval */
+	int cgid;                       /* The contention group I belong to (>= -1) */
 
-
+	taskgroup_t *tg_recycler;                         /* Taskgroup recycler */
 	/* Tasking structures
 	 */
 #if !defined(AVOID_OMPI_DEFAULT_TASKS)
@@ -456,9 +486,9 @@ struct ort_eecb_s
 #endif
 	/* Thread-library specific data
 	 */
-	void *ee_info;                             /* Handled by the ee library */
-	ort_eecb_t *next;         /* Used by the recycle mechanism */
+	void *ee_info;                                 /* Handled by the ee library */
 };
+
 
 /* List holding pointers to user's shared global variables (only if ee=proc) */
 typedef struct ort_sglvar_s ort_sglvar_t;
@@ -473,31 +503,66 @@ struct ort_sglvar_s
 #define FIFO        1
 #define LIFO        0
 
+#define FALSE       0
+#define TRUE        1
+#define AUTO        2
+
+
+/* League of teams (OpenMP 4.5/5.0) */
+typedef struct 
+{
+	int            numteams;    /* # initial teams participating in the league */
+	int            threadlimit; /* max # threads per contention group */
+	int volatile  *cg_size;     /* # active threads per contention group */
+	ort_eecb_t   **cg_inithr;   /* the initial threads of the contention groups */
+} league_t;                 /* NULL cg_inithr signifies the very initial team */
+
+
 /* All global variables ORT handles; if ee=proc, this is also placed
  * in shared memory.
  */
 typedef struct
 {
-	ort_icvs_t         icvs;
-	ort_caps_t         eecaps;
-	volatile ee_lock_t atomic_lock;       /* Global lock for atomic */
-	volatile ee_lock_t preparation_lock;  /* For initializing user locks */
-	ort_module_t       *modules;          /* System devices v.4.0.0 */
+	ort_icvs_t         icvs;               /* Global ICVs */
+	ort_caps_t         eecaps;             /* Capabilities of the EELIB */
+	int                embedmode;          /* To suppress some printouts */
+	
+	ort_module_t       module_host;        /* Module to use host as a device */
+	ort_module_t      *modules;            /* Device modules (except host) */
 	int                num_modules;
-	ort_device_t       *ort_devices;
-	int                added_devices;            /* v.4.0.0 */
+	ort_device_t      *ort_devices;        /* not working with ee_process yet */
+	int                num_devices;        /* device 0 is the host */
+
+	volatile ee_lock_t atomic_lock;        /* Global lock for atomic */
+	volatile ee_lock_t preparation_lock;   /* For initializing user locks */
 	volatile ee_lock_t eecb_rec_lock;
-	ort_eecb_t         *eecb_reycler;
-	int                thrpriv_num;       /* # threadprivate variables */
-	int                nthr_per_level[MAXNTHRLEVS]; /* nthreads[] list */
-	omp_proc_bind_t    bind_per_level[MAXBINDLEVS]; /* binds[] list, v4.0.0 */
-	int                set_nthrlevs;      /* # levels of nthreads defined */
-	int                set_bindlevs;      /* # levels of nthreads defined */
-	int                ompi_steal_policy; /* Worker steal? FIFO:LIFO */
-	int                taskqueuesize;     /* Size of task queues */
-	int                dynamic_taskqueuesize; /* Adapt task queuesize */
+	ort_eecb_t        *eecb_recycler;      /* not working with ee_process yet */
+	
+	int                thrpriv_num;        /* # threadprivate variables */
+	int                nthr_per_level[MAX_NUMTHR_LEVELS]; /* nthreads[] list */
+	omp_proc_bind_t    bind_per_level[MAX_BIND_LEVELS]; /* binds[] list, v4.0.0 */
+	int                set_nthrlevs;       /* # levels of nthreads defined */
+	int                set_bindlevs;       /* # levels of nthreads defined */
+	
+	int                ompi_steal_policy;  /* Worker steal? FIFO:LIFO */
+	int                taskqueuesize;      /* Size of task queues */
+	int                dynamic_taskqueuesize; /* Adapt task queue size */
+	int                partotask_policy;   /* Nested parallel-for/sections2task*/
+	
+	int              **place_partition;    /* OpenMP4 */
+	league_t           league;             /* The current league */
+	int                initleague_cgsize;  /* The initial contention group size */ 
+	int               *argc;               /* Pointer to main's argument */
+	char            ***argv;               /* Pointer to main's argument */
 } ort_vars_t;
 
+
+#define INITLEAGUE()  (ort->league.cg_inithr == NULL)
+#define CG_SIZE(cgid) (ort->league.cg_size[cgid])
+
+#define CANCEL_ENABLED() (ort->icvs.cancel)   /* True if enabled */
+
+#define TEAMINFO(eecb) ((eecb)->parent->mf)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                       *
@@ -509,6 +574,7 @@ typedef struct
 extern ort_vars_t *ort;
 /* My eecb */
 #ifdef USE_TLS
+	/* FIXME: This only works for pthreads */
 	extern TLS_KEYWORD void *myeecb;
 	#define __SETMYCB(v) (myeecb = v)
 	#define __MYCB       ((ort_eecb_t *) myeecb)
@@ -549,77 +615,97 @@ int ee_pid();
 	void ee_shmfree(int *p);
 #endif
 
-int   ort_initialize(int *argc, char ***argv, int nmodules, ...);
+int   ort_initialize(int *argc, char ***argv, int embedmode, int nmodules, ...);
 void  ort_finalize(int exitval);
 void *ort_calloc(int size);
 void  ort_prepare_omp_lock(omp_lock_t *lock, int type);
 void  ort_execute_kernel_on_host(void *(*func)(void *), void *shared);
+void *eecb_alloc(), eecb_free(ort_eecb_t *eecb);
+void *mcbf_alloc(void);
 
 /*
- * From ort_env.c
+ * From env.c
  */
 extern int display_env;
 void ort_get_environment(void);
 void display_env_vars(void);
-void ort_get_default_places(void);
-
 
 /*
- * From ort_barrier.c
+ * From places.c
  */
-
-int parallel_barrier_wait(ort_defbar_t *bar, int eeid);
+void  ort_get_default_places(void);
+void  ort_getenv_places(char *s);
+void  places_show();
+char *places_get_list_str(int pfrom, int pto);
+void  bindme(int eeid, ort_eecb_t *t, ort_eecb_t *parent);
 
 /*
- * From ort.c
+ * From affinity.c
  */
-void ort_enable_cancel_parallel(void);
-void ort_enable_cancel_sections(void);
-void ort_enable_cancel_for(void);
-void ort_enable_cancel_taskgroup(void);
-
-int  ort_check_cancel_for(void);
-int  ort_check_cancel_parallel(void);
-int  ort_check_cancel_sections(void);
-int  ort_check_cancel_taskgroup(void);
+void ort_set_affinity_format(const char *format);
+char *ort_get_default_affinity_format(void);
+size_t ort_get_affinity_format(char *buffer, size_t size);
+void ort_display_affinity(const char *format);
+size_t ort_capture_affinity(char *buffer, size_t size, const char *format);
 
 /*
- * From ort_ws.c
+ * From barrier.c
  */
+void parallel_barrier_wait(ort_defbar_t *bar, int eeid);
 
+/*
+ * From worksharing.c
+ */
 /* Workshare-related functions */
 void init_workshare_regions(ort_eecb_t *me);
 int  ort_check_section();
 
 /*
- * From ort_tasks.c
+ * From tasks.c & taskspf.c
  */
-
 void  ort_init_tasking();
 void  start_throttling_due_to_full_queue(void);
+void  ort_new_task(void *(*func)(void *arg), void *arg,
+                   int now, int final, int untied, int priority,
+                   void **deparray, int noutdeps, int nindeps, int ninoutdeps);
+void  ort_taskwait(int waitall);
+int   ort_task_execute_this(ort_eecb_t *me, ort_task_node_t *task_to_execute);
+int   ort_task_throttling(void);
 void  ort_create_task_immediate_node(ort_eecb_t *thr);
+void *ort_task_immediate_start(int final);
+void  ort_task_immediate_end(void *tn);
 void  ort_execute_my_tasks(ort_eecb_t *me);
 void  ort_start_implicit_task(ort_eecb_t *thr);
 void  ort_finish_implicit_task(ort_eecb_t *thr);
 
-/*
- * From ort_pools.c
- */
+void  spftasks_execute_node(ort_eecb_t *me, ort_task_node_t *tnode);
+void  spftasks_create(ort_eecb_t *me, int ntasks, int offs, void *(*f)(void*));
 
+/*
+ * From taskdeps.c
+ */
+void tdeps_issue_task(ort_task_node_t *tnode, 
+                      void **deparray, int out, int in, int inout);
+void tdeps_after_execution(ort_task_node_t *tnode, void *me);
+void tdeps_free_tdepinfo(void *dependencies);
+
+/*
+ * From pools.c
+ */
 ort_task_node_t *ort_task_alloc(void *(*func)(void *), void *arg);
+ort_task_node_t *ort_task_alloc_init(void *(*func)(void *), void *arg, 
+                             int final, int rtid, ort_eecb_t *thr);
+void             ort_task_free(ort_eecb_t *thr, ort_task_node_t *node);
 taskgroup_t     *taskgroup_alloc(void);
 void             taskgroup_free(taskgroup_t *arg);
-void             ort_task_free(ort_eecb_t *thr, ort_task_node_t *node);
 void             task_pools_init(ort_eecb_t *t);
-ort_task_node_t *ort_task_empty_node_alloc(void);
+void            *ort_taskenv_alloc(int size, void *(*task_func)(void *));
 
 /*
- * From ort_workstealing.c
+ * From stealing.c
  */
-
 void             ort_task_queues_init(ort_eecb_t *me, int nthr);
-int              ort_task_worker_enqueue(ort_eecb_t *me, void *(*func)(void *),
-                                         void *arg, int final);
+void             ort_task_worker_enqueue(ort_eecb_t *me, ort_task_node_t *tnde);
 ort_task_node_t *ort_task_worker_dequeue(ort_eecb_t *me);
 ort_task_node_t *ort_task_thief_steal(ort_eecb_t *me, int victim_id);
 
@@ -630,10 +716,26 @@ void ort_discover_modules(int nmodules, va_list ap);
 void ort_initialize_device(int device_id);
 void ort_finalize_devices();
 
+/* 
+ * From hostdev.c
+ */
+ort_module_t *ort_get_host_module();
+
 /*
  * From target.c
  */
 ort_device_t *ort_get_device(int dev_id);
-void          ort_initialize_decl();
+void          ort_decltarg_initialize();
+int           ort_illegal_device(char *reason, int devid);
+void         *ort_checkmapped_var(void *var, ort_device_t *d, int *how);
+int           target_associate_ptr(void *hostaddr, void *umedaddr, 
+                                   u_long size, u_long devoff, int devid);
+int           target_disassociate_ptr(void *hostaddr, int devid);
+
+/*
+ * From reduction.c
+ */
+void ort_reductions_init(ort_eecb_t *me, int teamsize);
+void ort_reductions_finalize(ort_eecb_t *me);
 
 #endif     /* __ORT_PRIVE_H__ */

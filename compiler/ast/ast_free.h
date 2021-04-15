@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_free.h */
@@ -36,6 +36,7 @@ extern void ast_spec_free(astspec t);
 extern void ast_ompcon_free(ompcon t);
 extern void ast_ompclause_free(ompclause t);
 extern void ast_ompdir_free(ompdir t);
+extern void ast_ompxli_free(ompxli xl);
 
 /* OMPi-extensions
  */

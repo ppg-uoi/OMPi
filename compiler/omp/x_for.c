@@ -17,12 +17,17 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_for.c */
 
 /*
+ * 2020/01/15
+ *   Added not-equal conditional operator as per OpenMP 5.0
+ * 2019/10/27
+ *   ort_num_iters() not needed any more; #iterations calculated directly
+ *   in the output code.
  * 2015/04/09
  *   changed ort_num_iters from variadic
  * 2011/03/17:
@@ -41,19 +46,91 @@
 
 #include <string.h>
 #include <assert.h>
+#include "stddefs.h"
 #include "x_for.h"
 #include "x_clauses.h"
+#include "x_reduction.h"
 #include "x_types.h"
 #include "ast_xform.h"
 #include "ast_free.h"
 #include "ast_copy.h"
 #include "ast_print.h"
+#include "x_arith.h"
 #include "str.h"
 #include "ompi.h"
 
+#define ITERCNT_SPECS \
+        Speclist_right(Declspec(SPEC_unsigned), Declspec(SPEC_long))
 
-/* Analyze a FOR statement and determine conformance to OpenMP & other stuff
- * that matter.
+
+/**
+ * Get FOR loop nest indicies; their number is given by the number in the
+ * ordered clause. This is a slimmed version of analyze_omp_for().
+ * @param s  the body of the #for construct
+ * @param orderednum the number in the ordered() clause (i.e. the nest depth)
+ * @return an array of symbols (freeable)
+ */
+symbol *ompfor_get_indices(aststmt s, int orderednum)
+{
+	aststmt init, tmp = s;
+	int     lid = 0;
+	symbol  *vars = smalloc(orderednum*sizeof(symbol));
+	
+	do 
+	{
+		assert(s != NULL && s->type == ITERATION && s->subtype == SFOR);
+		init = s->u.iteration.init;
+		if (init == NULL)
+		{
+		OMPFOR_ERROR:
+			exit_error(1, "(%s, line %d) openmp error:\n\t"
+				"non-conformant FOR statement\n", s->file->name, s->l);
+		}
+
+		/* Get var from the init part of the FOR */
+		if (init->type == EXPRESSION)     /* assignment: var = lb */
+		{
+			astexpr e = init->u.expr;
+			if (e == NULL || e->type != ASS || e->left->type != IDENT)
+				goto OMPFOR_ERROR;
+			vars[lid] = e->left->u.sym;
+		}
+		else
+			if (init->type == DECLARATION)  /* declaration: type var = lb */
+			{
+				astdecl d = init->u.declaration.decl;
+
+				if (d->type != DINIT)
+					goto OMPFOR_ERROR;
+				if (d->decl->type != DECLARATOR)
+					goto OMPFOR_ERROR;
+				if (d->decl->decl->type != DIDENT)
+					goto OMPFOR_ERROR;
+				vars[lid] = d->decl->decl->u.id;
+			}
+			else
+				goto OMPFOR_ERROR;
+
+		if (lid < orderednum - 1)
+		{
+			s = s->body;
+			if (s != NULL && s->type == COMPOUND && s->body != NULL &&
+			    s->body->type == ITERATION && s->body->subtype == SFOR)
+				s = s->body;  /* { For } -> For */
+			if (s == NULL || s->type != ITERATION || s->subtype != SFOR)
+				exit_error(1, "(%s, line %d) openmp error:\n\t"
+				      "an ordered(%d) clause requires %d perfectly nested FOR loops.\n",
+				      tmp->u.omp->directive->file->name, tmp->u.omp->directive->l,
+				      orderednum, orderednum);
+		}
+	}
+	while ((++lid) < orderednum);
+	return vars;
+}
+
+
+/* Analyze a FOR statement and determine conformance to OpenMP (canonicality)
+ * & other stuff that matter.
  */
 static
 void analyze_omp_for(aststmt s,
@@ -63,6 +140,7 @@ void analyze_omp_for(aststmt s,
 	aststmt init;
 	astexpr cond, incr, tmp;
 	int     rel;
+	char    *xtramsg = NULL;
 
 	assert(s != NULL && s->type == ITERATION && s->subtype == SFOR);
 	init = s->u.iteration.init;
@@ -72,11 +150,13 @@ void analyze_omp_for(aststmt s,
 	{
 	OMPFOR_ERROR:
 		exit_error(1, "(%s, line %d) openmp error:\n\t"
-		           "non-conformant FOR statement\n", s->file->name, s->l);
+		           "non-conformant FOR statement %s\n", s->file->name, s->l,
+		           xtramsg ? xtramsg : "");
 	}
 
 	/* Get var and lb from the init part of the FOR
 	 */
+	xtramsg = "(first part of the for)";
 	if (init->type == EXPRESSION)     /* assignment: var = lb */
 	{
 		astexpr e = init->u.expr;
@@ -107,9 +187,11 @@ void analyze_omp_for(aststmt s,
 
 	/* Get condition operator and ub from the cond part of the FOR
 	 */
+	xtramsg = "(condition operator)";
 	if (cond->type != BOP) goto OMPFOR_ERROR;
 	rel = cond->opid;
-	if (rel != BOP_lt && rel != BOP_gt && rel != BOP_leq && rel != BOP_geq)
+	if (rel != BOP_lt && rel != BOP_gt && rel != BOP_leq && rel != BOP_geq && 
+	    rel != BOP_neq) /* OpenMP 5.0 */
 		goto OMPFOR_ERROR;
 	/* OpenMP 3.0 allows swapping the left & right sides */
 	if (cond->left->type != IDENT || cond->left->u.sym != *var)
@@ -118,7 +200,8 @@ void analyze_omp_for(aststmt s,
 		cond->left = cond->right;
 		cond->right = tmp;
 		rel = (rel == BOP_lt) ? BOP_gt : (rel == BOP_leq) ? BOP_geq :
-		      (rel == BOP_gt) ? BOP_lt : BOP_leq;
+		      (rel == BOP_gt) ? BOP_lt : (rel == BOP_geq) ? BOP_leq : 
+		      BOP_neq;   /* stays the same */
 	}
 	if (cond->left->type != IDENT || cond->left->u.sym != *var) /* sanity check */
 		goto OMPFOR_ERROR;
@@ -127,6 +210,7 @@ void analyze_omp_for(aststmt s,
 
 	/* Last part: get step and increment operator from the incr part of the FOR
 	 */
+	xtramsg = "(increment part)";
 	if (incr->type != PREOP && incr->type != POSTOP && incr->type != ASS)
 		goto OMPFOR_ERROR;
 	if (incr->left->type != IDENT || incr->left->u.sym != *var) /* sanity check */
@@ -172,64 +256,249 @@ void analyze_omp_for(aststmt s,
 					*step = tmp->right;
 			}
 		}
+		/* OpenMP 5.0: check that step is +/-1 if condop is != */
+		if (*condop == BOP_neq)
+		{
+			int err;
+			
+			xtramsg = "('!=' condition requires unit increment)";
+			rel = xar_calc_int_expr(*step, &err);
+			if (err || (rel != 1 && rel != -1))
+				goto OMPFOR_ERROR;
+		}
 	}
 }
 
 
+#define CastLong(t) \
+	CastedExpr(Casttypename(Declspec(SPEC_long), NULL), Parenthesis(t))
+
 /* Generates "{ (long) ((u)-(l)), (long) s) }" */
 #define LongArray2Initer(u,l,s) \
 	BracedInitializer(\
-	                  CommaList(\
-	                            CastedExpr(\
-	                                       Casttypename(Declspec(SPEC_long), NULL), \
-	                                       UnaryOperator(UOP_paren, \
-	                                                     BinaryOperator(BOP_sub, \
-	                                                         ast_expr_copy(u), \
-	                                                         ast_expr_copy(l)\
-	                                                                   )\
-	                                                    )\
-	                                      ), \
-	                            CastedExpr(\
-	                                       Casttypename(Declspec(SPEC_long), NULL), \
-	                                       ast_expr_copy(s)\
-	                                      )\
-	                           )\
-	                 )
+	  CommaList(\
+	    CastLong(\
+	      Parenthesis( \
+	        BinaryOperator(BOP_sub, \
+	          ast_expr_copy(u), \
+	          ast_expr_copy(l) \
+	        )\
+	      )\
+	    ), \
+	    CastLong(ast_expr_copy(s))\
+	  )\
+	)
+
+/* Generates "{ (long) ((u) > (l) ? (u)-(l) : (l)-(u)), 
+ *              (long) ((u) > (l) ? (s) : -(s)) }" 
+#define LongArray2IniterUnsigned(u,l,s) \
+	BracedInitializer(\
+	  CommaList(\
+	    CastLong(\
+	      Parenthesis(\
+	        ConditionalExpr(\
+	          BinaryOperator(BOP_gt, ast_expr_copy(u), ast_expr_copy(l)),\
+	          BinaryOperator(BOP_sub, ast_expr_copy(u), ast_expr_copy(l)),\
+	          BinaryOperator(BOP_sub, ast_expr_copy(l), ast_expr_copy(u))\
+	        )\
+	      )\
+	    ),\
+	    CastLong(\
+	      Parenthesis(\
+	        ConditionalExpr(\
+	          BinaryOperator(BOP_gt,ast_expr_copy(u),ast_expr_copy(l)),\
+	          ast_expr_copy(s),\
+	          UnaryOperator(UOP_neg, ast_expr_copy(s))\
+	        )\
+	      )\
+	    )\
+	  )\
+	)
+ */
+
+
+/* Generates "{ (long) (l), (long) s, (long) iters_xx }" 
+ * The step (second field) has a sign depending on the direction increment.
+ */
+#define LongArray3Initer(l,s,d,itid) \
+	BracedInitializer(\
+	    Comma3(\
+	        CastLong(ast_expr_copy(l)), \
+          CastLong( \
+            ast_expr_copy((d) == BOP_add ? \
+              (s) : UnaryOperator(UOP_neg, Parenthesis(s)))), \
+	        CastLong(itid) \
+	    )\
+	)
+
+
+/**
+ * Given the loop specifications (l, u, s), this produces a correct
+ * (and possibly simplified) expression for the number of iterations,
+ * irrespectively of the type of the index variable.
+ * There are two cases, depending on the direction of the increment.
+ * If stepdir is BOP_add, then the # iterations is given by:
+ *   (u > l) ? ( st > 0 ? ( (u - l + s - 1) / s ) : 0 ) :
+ *             ( st < 0 ? ( (l - u - s - 1) / (-s) ) : 0)
+ * If stepdir is BOP_sub, then the # iterations is given by:
+ *   (u > l) ? ( st < 0 ? ( (u - l - s - 1) / (-s) ) : 0 ) :
+ *             ( st > 0 ? ( (l - u + s - 1) / s ) : 0)
+ * 
+ * In the usual case of st > 0, the above is simplified as:
+ *   (u > l) ? ( (u - l + s - 1) / s ) : 0   (for BOP_add)
+ *   (u > l) ? ( (l - u + s - 1) / s ) : 0   (for BOP_sub)
+ * and if s==1,
+ *   (u > l) ? (u - l) : 0       (for BOP_add)
+ *   (u > l) ? 0 : (l - u)       (for BOP_sub)
+ * 
+ * @param l the lower bound of the loop
+ * @param u the upper bound of the loop
+ * @param s the step increment
+ * @param stepdir the direction of the increment (BOP_add / BOP_sub)
+ * @param plainstep is 0 if the step increment is a full expression, 
+ *                  2 if it is a constant, or 1 if it is equal to 1.
+ * @return an expression for the total number of iterations
+ */
+static 
+astexpr specs2iters(astexpr l, astexpr u, astexpr s, int stepdir, int plainstep)
+{
+	if (plainstep)
+	{
+		if (plainstep == 1)       /* step = 1 */
+			return
+				ConditionalExpr(
+					Parenthesis(BinaryOperator(BOP_geq, ast_expr_copy(u), ast_expr_copy(l))),
+					(stepdir == BOP_add ? 
+						Parenthesis(BinaryOperator(BOP_sub,ast_expr_copy(u),ast_expr_copy(l))) 
+						: numConstant(0)),
+					(stepdir == BOP_sub ? 
+						Parenthesis(BinaryOperator(BOP_sub,ast_expr_copy(l),ast_expr_copy(u)))
+						: numConstant(0))
+				);
+		else                      /* step = positive constant */
+			return
+				ConditionalExpr(
+					Parenthesis(BinaryOperator(BOP_geq,ast_expr_copy(u),ast_expr_copy(l))),
+					(stepdir == BOP_add ? 
+						Parenthesis(
+							BinaryOperator(BOP_div,
+								Parenthesis(
+									BinaryOperator(BOP_add,
+										BinaryOperator(BOP_sub,ast_expr_copy(u),ast_expr_copy(l)),
+										BinaryOperator(BOP_sub,ast_expr_copy(s),numConstant(1))
+									)
+								),
+								ast_expr_copy(s)
+							)
+						) 
+						: numConstant(0)),
+					(stepdir == BOP_sub ? 
+						Parenthesis(
+							BinaryOperator(BOP_div,
+								Parenthesis(
+									BinaryOperator(BOP_add,
+										BinaryOperator(BOP_sub,ast_expr_copy(l),ast_expr_copy(u)),
+										BinaryOperator(BOP_sub,ast_expr_copy(s),numConstant(1))
+									)
+								),
+								ast_expr_copy(s)
+							)
+						) 
+						: numConstant(0))
+				);
+	}
+	
+	/* General case */
+	return
+		ConditionalExpr(
+			Parenthesis(BinaryOperator(BOP_geq, ast_expr_copy(u), ast_expr_copy(l))),
+			Parenthesis(
+				ConditionalExpr(
+					BinaryOperator(stepdir == BOP_add ? BOP_gt : BOP_lt, 
+						ast_expr_copy(s), 
+						numConstant(0)
+					),
+					Parenthesis(
+						BinaryOperator(BOP_div,
+							Parenthesis(
+								BinaryOperator(BOP_sub,
+									BinaryOperator(stepdir,
+										BinaryOperator(BOP_sub, ast_expr_copy(u), ast_expr_copy(l)),
+										ast_expr_copy(s)
+									),
+									numConstant(1)
+								)
+							),
+							stepdir == BOP_add ? 
+								ast_expr_copy(s) : UnaryOperator(UOP_neg, ast_expr_copy(s))
+						)
+					),
+					numConstant(0)
+				)
+			),
+			Parenthesis(
+				ConditionalExpr(
+					BinaryOperator(stepdir == BOP_add ? BOP_lt : BOP_gt, 
+						ast_expr_copy(s), 
+						numConstant(0)
+					),
+					Parenthesis(
+						BinaryOperator(BOP_div,
+							Parenthesis(
+								BinaryOperator(BOP_sub,
+									BinaryOperator(stepdir == BOP_add ? BOP_sub : BOP_add,
+										BinaryOperator(BOP_sub, ast_expr_copy(l), ast_expr_copy(u)),
+										ast_expr_copy(s)
+									),
+									numConstant(1)
+								)
+							),
+							stepdir == BOP_add ? 
+								UnaryOperator(UOP_neg, ast_expr_copy(s)) : ast_expr_copy(s)
+						)
+					),
+					numConstant(0)
+				)
+			)
+		);
+}
+
+
+#define MAXLOOPS 96
 
 
 /* Possible clauses:
  * private, firstprivate, lastprivate, reduction, nowait, ordered, schedule,
  * collapse.
- *
- * All OpenMP V3.0 clauses recognized.
  */
 void xform_for(aststmt *t)
 {
-	aststmt   s = (*t)->u.omp->body, parent = (*t)->parent, v,
-	          decls, inits = NULL, lasts = NULL, reds = NULL, stmp,
-	                 embdcls = NULL;
-	astexpr   lb, ub, step, lbs[10], ubs[10], steps[10], expr, elems;
-	symbol    var, vars[10];
-	int       incrop, condop;
-	int       schedtype = OC_static /* default */,
-	          static_chunk = 0, i = 0, collapsenum = 1;
+	aststmt   s = (*t)->u.omp->body, parent = (*t)->parent, v, realbody,
+	          decls, inits = NULL, lasts = NULL, reds = NULL, redarrinits = NULL, 
+	          redfree = NULL, stmp, embdcls = NULL, arrsecxvars = NULL;
+	astexpr   lb, ub, step, lbs[MAXLOOPS], ubs[MAXLOOPS], steps[MAXLOOPS], 
+	          expr, elems;
+	symbol    var, realvar, vars[MAXLOOPS];
+	int       incrop, condop, stepdir[MAXLOOPS];
+	int       schedtype = OC_static /* default */, modifer = OCM_none,
+	          static_chunk = 0, i = 0, collapsenum = 1, doacrossnum = 0, nestnum;
 	bool      ispfor = ((*t)->u.omp->type == DCFOR_P);
 	bool      haslast, hasboth, hasred;
 	astexpr   schedchunk = NULL;    /* the chunksize expression */
 	char      *chsize = NULL,       /* the chunksize value or variable */
-	           iters[10][128],
-	           plainstep,
-	           plainsteps[10],
-	           clabel[22];
+	          iters[MAXLOOPS][128],
+	          plainstep,
+	          plainsteps[MAXLOOPS],
+	          clabel[22];
 	ompclause nw  = xc_ompcon_get_clause((*t)->u.omp, OCNOWAIT),
 	          sch = xc_ompcon_get_clause((*t)->u.omp, OCSCHEDULE),
 	          ord = xc_ompcon_get_clause((*t)->u.omp, OCORDERED),
+	          ordnum = xc_ompcon_get_clause((*t)->u.omp, OCORDEREDNUM),
 	          col = xc_ompcon_get_clause((*t)->u.omp, OCCOLLAPSE);
 	bool      needbarrier = (nw == NULL &&
 	                         xform_implicit_barrier_is_needed((*t)->u.omp));
 	symtab    dvars;
 	stentry   varentry;
-
 
 	v = ompdir_commented((*t)->u.omp->directive); /* Put directive in comments */
 
@@ -256,22 +525,48 @@ void xform_for(aststmt *t)
 		/* Optimize: if schedchunk is a constant, don't use a variable for it */
 		if (schedchunk && schedchunk->type == CONSTVAL)
 			chsize = strdup(schedchunk->u.str);    /* memory leak */
+		modifer = sch->modifier;
 	}
+
+	if (ord && modifer == OCM_nonmonotonic)
+		exit_error(1, "(%s, line %d) openmp error:\n\t"
+		     "nonmonotonic schedules are not allowed along with ordered clauses.\n",
+		     (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+	
+	if (ord && ordnum)
+		exit_error(1, "(%s, line %d) openmp error:\n\t"
+		     "plain ordered clauses are not allowed in doacross loops.\n",
+		     (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
 
 	if (col)
 	{
-		if ((collapsenum = col->subtype) >= 10)
+		if ((collapsenum = col->subtype) >= MAXLOOPS)
 			exit_error(1, "(%s, line %d) ompi error:\n\t"
-			           "cannot collapse more than 10 FOR loops.\n",
-			           (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+				"cannot collapse more than %d FOR loops.\n",
+				(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,MAXLOOPS);
 	}
 
+	if (ordnum)
+	{
+		if ((doacrossnum = ordnum->subtype) >= MAXLOOPS)
+			exit_error(1, "(%s, line %d) ompi error:\n\t"
+				"doacross loop nests should have up to %d FOR loops.\n",
+				(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,MAXLOOPS);
+		if (doacrossnum < collapsenum)
+			exit_error(1, "(%s, line %d) ompi error:\n\t"
+		             "doacross loop collapse number cannot be larger "
+		             "than its ordered number.\n",
+		             (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l);
+	}
+	
 	/* Collect all data clause vars - we need to check if any vars
 	 * are both firstprivate and lastprivate
 	 */
 	dvars = xc_validate_store_dataclause_vars((*t)->u.omp->directive);
 
 	/* Analyze the loop(s) */
+	nestnum = (doacrossnum > collapsenum) ? doacrossnum : collapsenum;
+	i = 0;
 	do
 	{
 		analyze_omp_for(s, &var, &lb, &ub, &step, &condop, &incrop);
@@ -286,25 +581,25 @@ void xform_for(aststmt *t)
 				symtab_put(dvars, var, IDNAME)->ival = OCPRIVATE;
 			else
 				embdcls = (embdcls) ?
-				          BlockList(
-				            embdcls,
-				            Declaration( /* without the initializer */
-				              ast_spec_copy(s->u.iteration.init->u.declaration.spec),
-				              ast_decl_copy(s->u.iteration.init->u.declaration.decl->decl)
-				            )
-				          ) :
-				          Declaration(
-				            ast_spec_copy(s->u.iteration.init->u.declaration.spec),
-				            ast_decl_copy(s->u.iteration.init->u.declaration.decl->decl)
-				          );
+					BlockList(
+						embdcls,
+						Declaration( /* without the initializer */
+							ast_spec_copy(s->u.iteration.init->u.declaration.spec),
+							ast_decl_copy(s->u.iteration.init->u.declaration.decl->decl)
+						)
+					) :
+					Declaration(
+						ast_spec_copy(s->u.iteration.init->u.declaration.spec),
+						ast_decl_copy(s->u.iteration.init->u.declaration.decl->decl)
+					);
 		}
 		else
 		{
 			if (s->u.iteration.init->type != EXPRESSION)  /* a declaration */
 				exit_error(1, "(%s, line %d) openmp error:\n\t"
-				           "iteration variable '%s' is declared within the FOR statement\n\t"
-				           "and thus it cannot appear in the directive's data clauses.\n",
-				           (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l, var->name);
+					"iteration variable '%s' is declared within the FOR statement\n\t"
+					"and thus it cannot appear in the directive's data clauses.\n",
+					(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l, var->name);
 			/* Remove the FIRSTPRIVATE attribute if any (there is no use for it) */
 			/* Actually, v25 (p.64,l.23) specifies that the iteration variable
 			 * can only appear in a PRIVATE or LASTPRIVATE clause, so we should
@@ -312,41 +607,47 @@ void xform_for(aststmt *t)
 			 */
 			if (varentry->ival == OCFIRSTPRIVATE || varentry->ival == OCFIRSTLASTPRIVATE)
 				warning("(%s, line %d) warning:\n\t"
-				        "iteration variable '%s' cannot appear in a FIRSTPRIVATE clause..\n\t"
-				        "  .. let's pretend it was in a PRIVATE clause.\n",
-				        (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l, var->name);
+					"iteration variable '%s' cannot appear in a FIRSTPRIVATE clause..\n\t"
+					"  .. let's pretend it was in a PRIVATE clause.\n",
+					(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l, var->name);
 			if (varentry->ival == OCFIRSTPRIVATE)
 				varentry->ival = OCPRIVATE;
 			else
 				if (varentry->ival == OCFIRSTLASTPRIVATE)
 					varentry->ival = OCLASTPRIVATE;
 		}
-
+		
 		if (step == NULL || step->type == CONSTVAL)   /* ++/-- or += constant */
 		{
+			plainstep = (step == NULL) ? 1 : 2;
 			step = (step == NULL) ? numConstant(1) : ast_expr_copy(step);
-			plainstep = 1;
 		}
 		else /* step != NULL && general expression for step */
 		{
-			step = Parenthesis(ast_expr_copy(step));  /* An expression */
+			step = Parenthesis(ast_expr_copy(step));   /* An expression */
 			plainstep = 0;
 		}
-		if (incrop == BOP_sub)                        /* negative step */
-			step = Parenthesis(UnaryOperator(UOP_neg, step));
 
-		vars[i]  = var;
-		lbs[i]   = Parenthesis(ast_expr_copy(lb));
-		ubs[i]   = (condop == BOP_leq || condop == BOP_geq) ?  /* correct ub */
-		           BinaryOperator((condop == BOP_leq) ? BOP_add : BOP_sub,
-		                          Parenthesis(ast_expr_copy(ub)),
-		                          numConstant(1)) :
-		           ast_expr_copy(ub);
+		vars[i] = var;
+		lbs[i]  = Parenthesis(ast_expr_copy(lb));
+		ubs[i]  = Parenthesis(
+		            (condop == BOP_leq || condop == BOP_geq) ?  /* correct ub */
+		            BinaryOperator((condop == BOP_leq) ? BOP_add : BOP_sub,
+		                           Parenthesis(ast_expr_copy(ub)),
+		                           numConstant(1)) :
+		            ast_expr_copy(ub)
+		          );
 		steps[i] = step;
+		stepdir[i] = incrop;
 		sprintf(iters[i], "iters_%s_", var->name);
-		plainsteps[i] = plainstep;
+		plainsteps[i] = plainstep;      /* TODO: actually use this info */
 
-		if (i < collapsenum - 1)
+		if (i == collapsenum-1)
+		{
+			realbody = s;                 /* Remember where the real body is */
+			realvar = var;
+		}
+		if (i < nestnum - 1)
 		{
 			s = s->body;
 			if (s != NULL && s->type == COMPOUND && s->body != NULL &&
@@ -354,16 +655,22 @@ void xform_for(aststmt *t)
 				s = s->body;  /* { For } -> For */
 			if (s == NULL || s->type != ITERATION || s->subtype != SFOR)
 				exit_error(1, "(%s, line %d) openmp error:\n\t"
-				           "a collapse(%d) clause requires %d perfectly nested FOR loops.\n",
-				           (*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,
-				           collapsenum, collapsenum);
+					"%d perfectly nested FOR loops were expected.\n",
+					(*t)->u.omp->directive->file->name, (*t)->u.omp->directive->l,
+					nestnum, nestnum);
 		}
-
 	}
-	while ((++i) < collapsenum);
+	while ((++i) < nestnum);
+	s = realbody;
+	var = realvar;
+
+	/* get possibly new variables for array section parameters */
+	arrsecxvars = red_arrayexpr_simplify((*t)->u.omp->directive);
 
 	/* declarations from the collected vars (not the clauses!) */
 	decls = xc_stored_vars_declarations(&haslast, &hasboth, &hasred);
+	if (arrsecxvars)
+		decls = decls ? Block2(arrsecxvars, decls) : arrsecxvars;
 	/* initialization statements for firstprivate non-scalar vars */
 	if (decls)
 		inits = xc_ompdir_fiparray_initializers((*t)->u.omp->directive);
@@ -371,26 +678,36 @@ void xform_for(aststmt *t)
 	if (haslast)
 		lasts = xc_ompdir_lastprivate_assignments((*t)->u.omp->directive);
 	if (hasred)
-		reds = xc_ompdir_reduction_code((*t)->u.omp->directive);
-	/* we need a few more variables */
-	stmp = Declaration(    /* declare: struct _ort_gdopt_ gdopt_; */
-	         SUdecl(SPEC_struct, Symbol("_ort_gdopt_"), NULL),
-	         Declarator(NULL, IdentifierDecl(Symbol("gdopt_")))
-	       );
-	if (embdcls)
-		stmp = BlockList(embdcls, stmp);
+	{
+		/* Temporary local variables should be kept till the reduction operation
+		 * is fully completed; this is guaranteed if after a barrier, so we must
+		 * turn off any barrier removals.
+		 * TODO: maybe we should re-design reductions...
+		 */
+		if (!oldReduction)
+			needbarrier = true;
+		/* Initializers for array reductions */
+		redarrinits = red_array_initializers_from_ompdir((*t)->u.omp->directive);
+		if (redarrinits)
+			inits = (inits) ? BlockList(inits, redarrinits) : redarrinits;
+		/* Code to do the reductions */
+		reds = red_generate_code_from_ompdir((*t)->u.omp->directive);
+		/* Possible de-allocations to go after the barrier */
+		redfree = red_generate_deallocations_from_ompdir((*t)->u.omp->directive);
+	}
 
+	stmp  = (embdcls) ? embdcls : verbit(" ");
 	if (schedtype == OC_affinity)
 	{
 		if (haslast)
 			stmp = BlockList(
 			         stmp,
-			         Declaration(    /* declare: int niters_,iter_=1; */
-			           Declspec(SPEC_int),
+			         Declaration(    /* declare: <specs> niters_,iter_=1; */
+			           ITERCNT_SPECS,
 			           DeclList(
 			             Declarator(NULL, IdentifierDecl(Symbol("niters_"))),
 			             InitDecl(
-			               Declarator(NULL, IdentifierDecl(Symbol("iter_"))),
+			               Declarator(NULL, IdentifierDecl(Symbol(NORMALIZEDITER))),
 			               numConstant(1)
 			             )
 			           )
@@ -402,7 +719,7 @@ void xform_for(aststmt *t)
 		stmp = BlockList(
 		         stmp,  /* Initialize because if a thread gets no iterations, the */
 		         Declaration(  /* lastprivate check for iter==niters may succeed! */
-		           Declspec(SPEC_int),/* int niters_=0,iter_=-1,fiter_,liter_=-2; */
+		           ITERCNT_SPECS,  /*  <specs> niters_=0,iter_=0,fiter_,liter_=0; */
 		           DeclList(
 		             DeclList(
 		               DeclList(
@@ -411,34 +728,40 @@ void xform_for(aststmt *t)
 		                   numConstant(0)
 		                 ),
 		                 InitDecl(
-		                   Declarator(NULL, IdentifierDecl(Symbol("iter_"))),
-		                   UnaryOperator(UOP_neg, numConstant(1))
+		                   Declarator(NULL, IdentifierDecl(Symbol(NORMALIZEDITER))),
+		                   numConstant(0)
 		                 )
 		               ),
 		               Declarator(NULL, IdentifierDecl(Symbol("fiter_")))
 		             ),
 		             InitDecl(
 		               Declarator(NULL, IdentifierDecl(Symbol("liter_"))),
-		               UnaryOperator(UOP_neg, numConstant(2))
+		               numConstant(0)
 		             )
 		           )
 		         )
 		       );
-		if (collapsenum > 1)        /* We need variables for # iterations */
+		if (collapsenum > 1 || doacrossnum > 0)  /* We need vars for # iterations */
 		{
-			stmp = BlockList(
-			         stmp,
-			         Declaration(Declspec(SPEC_int),
-			                     InitDecl(
-			                       Declarator(NULL, IdentifierDecl(Symbol("pp_"))),
-			                       numConstant(1)
-			                     ))
-			       );
-			for (i = 0; i < collapsenum; i++)
+			if (collapsenum > 1)
 				stmp = BlockList(
 				         stmp,
-				         Declaration(Declspec(SPEC_int),
-				                     Declarator(NULL, IdentifierDecl(Symbol(iters[i]))))
+				         Declaration(ITERCNT_SPECS,
+				                     InitDecl(
+				                       Declarator(NULL, IdentifierDecl(Symbol("pp_"))),
+				                       numConstant(1)
+				                     ))
+				       );
+			for (i = 0; i < nestnum; i++)
+				stmp = BlockList(
+				         stmp,
+				         Declaration(
+				           ITERCNT_SPECS,
+				           InitDecl(
+				             Declarator(NULL, IdentifierDecl(Symbol(iters[i]))),
+			               specs2iters(lbs[i],ubs[i],steps[i],stepdir[i],plainsteps[i])
+				           )
+				         )
 				       );
 		}
 		if (chsize == NULL)
@@ -449,18 +772,18 @@ void xform_for(aststmt *t)
 				stmp = BlockList(
 				         stmp,
 				         Declaration(
-				           Declspec(SPEC_int),
+				           ITERCNT_SPECS,
 				           (schedtype == OC_runtime) ?
-				           Declarator(NULL, IdentifierDecl(Symbol(chsize))) :
-				           InitDecl(
-				             Declarator(NULL, IdentifierDecl(Symbol(chsize))),
-				             ast_expr_copy(schedchunk)
-				           )
+				             Declarator(NULL, IdentifierDecl(Symbol(chsize))) :
+				             InitDecl(
+				               Declarator(NULL, IdentifierDecl(Symbol(chsize))),
+				               ast_expr_copy(schedchunk)
+				             )
 				         )
 				       );
 			}
 		}
-		/* we may need 4 more variables */
+		/* we may need 2 more variables (int) */
 		if (static_chunk)
 			stmp = BlockList(
 			         stmp,
@@ -498,6 +821,38 @@ void xform_for(aststmt *t)
 			stmp = BlockList(stmp, xdc);
 		}
 	}
+
+	/* Finally, we need the loop parameters for doacross loops */
+	if (ordnum)
+	{
+		/* Form the initializer */
+		elems = LongArray3Initer(lbs[0], steps[0], stepdir[0], IdentName(iters[0]));
+		for (i = 1; i < doacrossnum; i++)
+			elems = 
+				CommaList(
+					elems, 
+					LongArray3Initer(lbs[i], steps[i], stepdir[i], IdentName(iters[i]))
+				);
+		/* Declare and initialize _doacc_params_[][3] */
+		stmp = BlockList(
+				stmp, 
+				Declaration(
+					Declspec(SPEC_long),
+					InitDecl(
+						Declarator(
+							NULL,
+							ArrayDecl(
+								ArrayDecl(IdentifierDecl(Symbol(DOACCPARAMS)),NULL,NULL),
+								NULL,
+								Constant("3")
+							)
+						),
+						BracedInitializer(elems)
+					)
+				)
+			);
+	}
+
 	decls = (decls) ? BlockList(decls, stmp) : stmp;
 
 	/*
@@ -511,67 +866,45 @@ void xform_for(aststmt *t)
 		decls = BlockList(decls, inits);  /* Append the initialization statements */
 
 	/* Append our new code: niters_ = ...; ort_entering_for(...); */
-	elems = LongArray2Initer(ubs[0], lbs[0], steps[0]);
-	for (i = 1; i < collapsenum; i++)
-		elems =
-		  CommaList(elems, LongArray2Initer(ubs[i], lbs[i], steps[i]));
-	elems =
-	  CastedExpr(         /* (int[][2])elems */
-	    Casttypename(
-	      Declspec(SPEC_long),
-	      AbstractDeclarator(
-	        NULL,
-	        ArrayDecl(
-	          ArrayDecl(NULL, NULL, NULL),
-	          NULL,
-	          Constant("2")
-	        )
-	      )
-	    ),
-	    BracedInitializer(elems)
-	  );
-	expr = CommaList(numConstant(collapsenum), elems);
-	if (collapsenum > 1)
-		elems = UOAddress(IdentName(iters[0]));
+	if (collapsenum == 1 && doacrossnum == 0)
+		elems = CastLong( 
+		          specs2iters(lbs[0], ubs[0], steps[0], stepdir[0], plainsteps[0]) 
+		        );
 	else
-		elems = NullExpr();        /* (void *) 0 */
-	for (i = 1; i < collapsenum; i++)
-		elems = CommaList(elems, UOAddress(IdentName(iters[i])));
-	elems =
-	  CastedExpr(
-	    Casttypename(
-	      Declspec(SPEC_int),
-	      AbstractDeclarator(
-	        Declspec(SPEC_star),
-	        ArrayDecl(NULL, NULL, NULL)
-	      )
-	    ),
-	    BracedInitializer(elems)
-	  );
-	expr = CommaList(expr, elems);    /* All args to ort_num_iters() */
-	expr = FunctionCall(IdentName("ort_num_iters"), expr); /* The call */
+		for (elems = IdentName(iters[0]), i = 1; i < collapsenum; i++)
+			elems = BinaryOperator(BOP_mul, elems, IdentName(iters[i]));
+	expr = elems;
 
-	stmp = BlockList(
-	         decls,
-	         Expression(      /* ort_entering_for(nw,ord,&gdopt_); */
+	if (ordnum)               /* Need more info for doacross loops */
+		stmp = Expression(      /* ort_entering_doacross(nw,doacnum,collnum,...); */
 	           FunctionCall(
-	             IdentName("ort_entering_for"),
-	             CommaList(
-	               CommaList(
-	                 numConstant(nw ? 1 : 0),
-	                 numConstant(ord ? 1 : 0)
-	               ),
-	               UOAddress(IdentName("gdopt_"))
+	             IdentName("ort_entering_doacross"),
+	             Comma6(
+	               numConstant(nw ? 1 : 0),
+	               numConstant(doacrossnum),
+	               numConstant(collapsenum),
+	               numConstant(FOR_CLAUSE2SCHED(schedtype, static_chunk)),
+	               schedchunk ? IdentName(chsize) : numConstant(-1),
+	               IdentName(DOACCPARAMS)
 	             )
 	           )
-	         )
-	       );
+	         );
+	else
+		stmp = Expression(      /* ort_entering_for(nw,ord); */
+	           FunctionCall(
+	             IdentName("ort_entering_for"),
+	             Comma2(numConstant(nw ? 1 : 0), numConstant(ord ? 1 : 0))
+	           )
+	         );
+
+		
 	stmp = BlockList(
-	         stmp,
-	         Expression(     /* niters_ = ort_num_iters(...) */
+	         Expression(     /* niters_ = ... */
 	           Assignment(IdentName("niters_"), ASS_eq, expr)
-	         )
+	         ),
+	         stmp
 	       );
+	stmp = BlockList(decls, stmp);
 	if (hasboth)   /* a var is both fip & lap; this needs a barrier here :-( */
 		stmp = BlockList(stmp, BarrierCall());
 
@@ -584,20 +917,6 @@ void xform_for(aststmt *t)
 			if (lasts)
 				s->body = BlockList(   /* iter++ */
 				            Expression(PostOperator(IdentName("iter"), UOP_inc)),
-				            s->body
-				          );
-			if (ord)
-				s->body = BlockList(
-				            Expression( /* ort_thischunk_range(iter_-1); */
-				              FunctionCall(
-				                IdentName("ort_thischunk_range"),
-				                CommaList(BinaryOperator(BOP_sub,
-				                                         IdentName("iter_"),
-				                                         numConstant(1)),
-				                          IdentName("iter_")
-				                         )
-				              )
-				            ),
 				            s->body
 				          );
 			s->body = Compound(s->body);
@@ -624,7 +943,7 @@ void xform_for(aststmt *t)
 				        AssignStmt(
 				          Identifier(vars[i]),
 				          BinaryOperator(
-				            BOP_add,
+				            stepdir[i], //BOP_add,
 				            ast_expr_copy(lbs[i]),
 				            BinaryOperator(
 				              BOP_mul,
@@ -635,7 +954,7 @@ void xform_for(aststmt *t)
 				                  Parenthesis(
 				                    BinaryOperator(
 				                      BOP_div,
-				                      IdentName("iter_"),
+				                      IdentName(NORMALIZEDITER),
 				                      IdentName("pp_")
 				                    )
 				                  ),
@@ -657,62 +976,61 @@ void xform_for(aststmt *t)
 		}
 		/* Loop becomes:
 		 *   for (iter = fiter; iter < liter; iter++) {
-		 *     <var> = lb + iter*step
+		 *     <var> = lb +/- iter*step
 		 *     <body>
 		 *   }
 		 * optimized as:
-		 *   for (iter = fiter, var = lb; iter < liter; iter++, var += step) {
+		 *   for (iter = fiter, var = ...; iter < liter; iter++, var +/-= step) {
 		 *     <body>
 		 *   }
+		 * If there is an ordered clause, we insert "ort_for_curriter(iter_)"
+		 * just before the body, to let the runtime know our current iteration.
 		 */
+
+#define ORTCURRITER \
+     Expression(FunctionCall(IdentName("ort_for_curriter"), \
+     IdentName(NORMALIZEDITER)))
+
 		s = For(Expression((collapsenum > 1) ?
-		                   Assignment(IdentName("iter_"),
+		                   Assignment(IdentName(NORMALIZEDITER),
 		                              ASS_eq,
 		                              IdentName("fiter_"))
 		                   :
 		                   CommaList(
-		                     Assignment(IdentName("iter_"),
+		                     Assignment(IdentName(NORMALIZEDITER),
 		                                ASS_eq,
 		                                IdentName("fiter_")),
 		                     Assignment(Identifier(var),
 		                                ASS_eq,
-		                                BinaryOperator(BOP_add, ast_expr_copy(lb),
-		                                               BinaryOperator(BOP_mul,
-		                                                   IdentName("fiter_"),
-		                                                   ast_expr_copy(step))
-		                                              )
+		                                BinaryOperator(
+		                                  stepdir[0], 
+		                                  ast_expr_copy(lbs[0]),
+		                                  BinaryOperator(BOP_mul,
+		                                    IdentName("fiter_"),
+		                                    ast_expr_copy(steps[0]))
+		                                  )
 		                               )
 		                   )
 		                  ),
-		        BinaryOperator(BOP_lt, IdentName("iter_"),
+		        BinaryOperator(BOP_lt, IdentName(NORMALIZEDITER),
 		                       IdentName("liter_")
 		                      ),
 		        ((collapsenum > 1) ?
-		         PostOperator(IdentName("iter_"), UOP_inc) :
+		         PostOperator(IdentName(NORMALIZEDITER), UOP_inc) :
 		         CommaList(
-		           PostOperator(IdentName("iter_"), UOP_inc),
-		           Assignment(Identifier(var), ASS_add,
-		                      ast_expr_copy(step))
+		           PostOperator(IdentName(NORMALIZEDITER), UOP_inc),
+		           Assignment(Identifier(var), 
+		                      stepdir[0]==BOP_add ? ASS_add : ASS_sub,
+		                      ast_expr_copy(steps[0]))
 		         )
 		        ),
-		        (collapsenum > 1) ? Compound(BlockList(idx, s->body)) : s->body
+		        (collapsenum > 1) ? 
+		          ( ord ? Compound(BlockList(BlockList(idx, ORTCURRITER), s->body)) :
+		                  Compound(BlockList(idx, s->body)) ) : 
+		          ( ord ? Compound(BlockList(ORTCURRITER, s->body)) : s->body )
 		       );
 
-		/* The ordered_begin() needs to know the current chunk's start
-		 * (from_) in order to work. However, "from_" may be unavailable
-		 * as a variable if the ORDERED directive is orphaned. Thus,
-		 * we have to store is somewhere just in case.
-		 */
-		if (ord)
-			s = BlockList(
-			      Expression( /* ort_thischunk_range(fiter_); */
-			        FunctionCall(IdentName("ort_thischunk_range"),
-			                     CommaList(
-			                       IdentName("fiter_"),
-			                       IdentName("liter_")
-			                     ))),
-			      s
-			    );
+#undef ORTCURRITER
 	}
 
 	/* Schedule-dependent code */
@@ -758,31 +1076,31 @@ void xform_for(aststmt *t)
 			         stmp,
 			         While(
 			           parse_expression_string(
-			             "ort_get_%s_chunk(niters_,%s,&fiter_,&liter_,(int*)0,&gdopt_)",
+			             "ort_get_%s_chunk(niters_,%s,%s,&fiter_,&liter_,(int*)0)",
 			             schedtype == OC_guided ? "guided" : "dynamic",
-			             schedchunk ? chsize : "1"),
+			             schedchunk ? chsize : "1",
+			             (modifer == OCM_none || modifer == OCM_monotonic) ? "1":"0"),
 			           Compound(s)
 			         )
 			       );
 			break;
 
 		case OC_runtime:
-			stmp = BlockList(
-			         BlockList(
-			           stmp,
-			           /* ort_get_runtime_schedule_stuff(&get_chunk_, &chunksize_); */
-			           FuncCallStmt(
-			             IdentName("ort_get_runtime_schedule_stuff"),
-			             CommaList(
-			               UOAddress(IdentName("get_chunk_")),
-			               UOAddress(IdentName("chunksize_"))
-			             )
+			stmp = Block3(
+			         stmp,
+			         /* ort_get_runtime_schedule_stuff(&get_chunk_, &chunksize_); */
+			         FuncCallStmt(
+			           IdentName("ort_get_runtime_schedule_stuff"),
+			           CommaList(
+			             UOAddress(IdentName("get_chunk_")),
+			             UOAddress(IdentName("chunksize_"))
 			           )
 			         ),
 			         While(
 			           parse_expression_string(  /* Too big to do it by hand */
-			             "(*get_chunk_)(niters_, chunksize_, &fiter_, &liter_, "
-			             "&staticextra_, &gdopt_)"),
+			             "(*get_chunk_)(niters_, chunksize_, %s, &fiter_, &liter_, "
+			             "&staticextra_)", 
+			             (modifer == OCM_none || modifer == OCM_monotonic) ? "0":"1"),
 			           Compound(s)
 			         )
 			       );
@@ -797,22 +1115,22 @@ void xform_for(aststmt *t)
 
 	/* Add a label that is used when canceling */
 	*t = BlockList(*t, Labeled(Symbol(clabel), Expression(NULL)));
-	if (!ispfor)
+	if (!ispfor || ord || ordnum)   /* Still need it if ordered clause exists */
 		*t = BlockList(*t, Call0_stmt("ort_leaving_for"));
 	if (lasts)
 	{
 		if (collapsenum > 1)
 		{
-			aststmt idx;     /* Need to set explicitly the correct index values! */
+			aststmt idx;     /* Need to set explicitly the correct index values */
 
 			idx = Expression(
-			        Assignment(Identifier(vars[0]), ASS_add, ast_expr_copy(steps[0]))
+			        Assignment(Identifier(vars[0]), stepdir[0] == BOP_add ? ASS_add : ASS_sub, ast_expr_copy(steps[0]))
 			      );
 			for (i = 1; i < collapsenum; i++)
 				idx = BlockList(
 				        idx,
 				        Expression(
-				          Assignment(Identifier(vars[i]), ASS_add, ast_expr_copy(steps[i]))
+				          Assignment(Identifier(vars[i]), stepdir[i] == BOP_add ? ASS_add : ASS_sub, ast_expr_copy(steps[i]))
 				        )
 				      );
 			lasts = BlockList(idx, lasts);
@@ -821,10 +1139,13 @@ void xform_for(aststmt *t)
 		*t = BlockList(
 		       *t,
 		       If(
-		         BinaryOperator(BOP_eqeq,
-		                        IdentName("iter_"),
-		                        IdentName("niters_")
-		                       ),
+		         BinaryOperator(BOP_land,
+		           IdentName(NORMALIZEDITER),
+		           BinaryOperator(BOP_eqeq,
+		             IdentName(NORMALIZEDITER),
+		             IdentName("niters_")
+		           )
+		         ),
 		         lasts->type == STATEMENTLIST ?  Compound(lasts) : lasts,
 		         NULL
 		       )
@@ -834,6 +1155,11 @@ void xform_for(aststmt *t)
 		*t = BlockList(*t, reds);
 	if (needbarrier)
 		*t = BlockList(*t, BarrierCall());
+	else
+		if (!nw)   /* We ditched the barrier; but should at least flush */
+			*t = BlockList(*t, Call0_stmt("ort_fence")); 
+	if (redfree)
+		*t = BlockList(*t, redfree);
 
 	*t = Compound(*t);
 	ast_stmt_parent(parent, *t);

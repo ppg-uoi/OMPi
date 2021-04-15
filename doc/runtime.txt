@@ -15,10 +15,10 @@ The host runtime system of OMPi & how to experiment with it
 --
 
 Since version 2.0.0, OMPi has a new runtime organization so as to  
-support OpenMP 4 devices. It consists of two subsystems: 
+support OpenMP 4.X devices. It consists of two subsystems: 
 
   (a) the host subsystem (runtime/host) and
-  (b) the device subsystem (runtime/dev_*).
+  (b) the devices subsystem (runtime/devices/*).
   
 What we describe here refers to the host subsystem. Documentation for
 devices can be found in the corresponding file (runtime-dev.txt).
@@ -28,9 +28,9 @@ devices can be found in the corresponding file (runtime-dev.txt).
 2. WHAT OMPi SHIPS WITH
 --
 
-OMPi is distributed with a number of different host runtime libraries,
-and supports even more. By default, the "pthreads" library is 
-installed with OMPi, unless a different choice was made at 
+OMPi is distributed with a number of different host runtime threading
+libraries, and supports even more. By default, the "pthreads" library 
+is installed with OMPi, unless a different choice was made at 
 configuration time (see ../README file). This library is based
 on POSIX threads and provides support for nested parallelism.
 
@@ -53,7 +53,7 @@ interface between them is fixed ((b) only expects (a) to
 provide the functions prototyped in "ee.h").
 
 This means that anybody can develop his/her own threading 
-library and use it instead of the one used in OMPi by default.
+library and employ it instead of the one used in OMPi by default.
 All s/he has to do is provide a new "othr.c" in place of
 the default one and obey the "ee.h" interface (see the 
 documentation in OMPi's website on how to do this).
@@ -74,7 +74,7 @@ etc, correspondingly.
 To facilitate experimenting with different threading libraries,
 while keeping the ones shipped with OMPi, OMPi uses the following
 scheme. Suppose you created a new EE library, named "foo" and you 
-want be able to use it whenever you like (you will need the auto*
+want to be able to use it whenever you like (you will need the auto*
 tools for this procedure):
 
   1. Create a directory named "ee_foo" in the runtime/host/ directory
@@ -134,6 +134,9 @@ use the --disable-defaultlib flag when configuring:
         cd runtime
         ...
 
+Another way of doing this is to re-configure OMPi with a different EELIB;
+that one will then become the default.
+
 
 --
 5. SPECIAL SITUATIONS
@@ -171,7 +174,7 @@ high-performance, unlimited nested parallelism support. Psthreads
 is a separate software package that has to be configured and 
 installed into your system. It is distributed under the GNU 
 General Public License and can be downloaded from the OMPi's 
-web site: http://paragroup.cs.uoi.gr/wpsite/software.
+web site: http://paragroup.cse.uoi.gr/wpsite/software.
 
 Before using psthreads with OMPi, you have to install psthreads 
 separately in your system. Psthreads installs two scripts
@@ -182,8 +185,8 @@ Assuming that you are currently working in the root directory
 of OMPi's source tree, here is all that is needed:
 
         ./configure CFLAGS="`psthreads_cflags`" --with-ortlib=psthr ...
-	cd lib
-	make clean
+        cd runtime
+        make clean
         make
         make install
 

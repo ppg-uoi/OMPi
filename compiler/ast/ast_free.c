@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_free.c -- free the nodes on an AST */
@@ -46,6 +46,28 @@ static void free_verbatim(aststmt t, void *ignore, int ignore2)
 	}
 }
 
+static void _free_asmop(asmop t)
+{
+	if (!t) return; 
+	if (t->symbolicname) ast_expr_free(t->symbolicname);
+	free(t->constraint);
+	_free_asmop(t->next);
+	_free_asmop(t->op);
+	free(t);
+}
+
+static void free_asmstmt(aststmt t, void *ignore, int ignore2)
+{
+	if (t)
+	{
+		free(t->u.assem->template);
+		if (t->u.assem->ins)
+			_free_asmop(t->u.assem->ins);
+		if (t->u.assem->outs)
+			_free_asmop(t->u.assem->outs);
+		free(t);
+	}
+}
 
 static void free_expr(astexpr t, void *ignore, int ignore2)
 {
@@ -64,7 +86,12 @@ static void free_expr_fixed(astexpr t, void *ignore, int ignore2)
 
 static void free_spec(astspec t, void *ignore, int ignore2)
 {
-	if (t) free(t);
+	if (t) 
+	{
+		if (t->type == ATTRSPEC && t->u.txt != NULL)
+			free(t->u.txt);
+		free(t);
+	}
 }
 
 static void free_decl(astdecl t, void *ignore, int ignore2)
@@ -73,8 +100,27 @@ static void free_decl(astdecl t, void *ignore, int ignore2)
 }
 
 
+/* export */
+void ast_ompxli_free(ompxli xl)
+{
+	if (!xl) return;
+	if (xl->xlitype != OXLI_IDENT)
+	{
+		omparrdim s, next;
+		for (s = xl->dim; s; s = next)
+		{
+			next = s->next;
+			if (s->lb) ast_expr_free(s->lb);
+			if (s->len) ast_expr_free(s->len);
+			free(s);
+		}
+	}
+	free(xl);
+}
+
 static void free_ompclause(ompclause t, void *ignore, int ignore2)
 {
+	// TODO: fix memory leak for extended list items...
 	if (t) free(t);
 }
 
@@ -116,6 +162,7 @@ static void init_free_trops()
 	                    free_ompclause, free_ompdir, free_ompcon, 
 	                    free_oxclause, free_oxdir, free_oxcon);
 	freetrops->stmtc.verbatim_c = free_verbatim;
+	freetrops->stmtc.asmstmt_c = free_asmstmt;;
 	freetrops->exprc.constval_c = free_expr_fixed;
 	freetrops->exprc.string_c = free_expr_fixed;
 	freetrops->when = POSTVISIT;

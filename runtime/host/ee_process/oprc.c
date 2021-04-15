@@ -17,8 +17,12 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
+
+/* ee_process/oprc.c
+ * Implements OpenMP treading through processes
+ */
 
 #include <pthread.h>
 #include <stdio.h>
@@ -30,32 +34,35 @@
 #include <sys/wait.h>
 #include "../ort.h"
 #include "ee.h"
+
+#define MAXSHMLOCKS 100                /* Maximum number of locks */
 #define WAIT_WHILE(f) { FENCE; for(;f;) oprc_yield(); }
 
 oprc_lock_t *slock = NULL;             /* User-defined lock */
 int slock_id = -1;                     /* Memory ID of the shared lock */
-int *number_of_lock = NULL;            /* Counter of used locks */
-int number_of_lock_id = -1;            /* Memory ID of the lock counter */
+int *lock_counter = NULL;              /* Counter of used locks */
+int lock_counter_id = -1;              /* Memory ID of the lock counter */
 
-static int proc_lib_inited = 0;     /* Flag to avoid re-initializations */
-static int num_created;                /* How many threads exist in total */
+static int eeproc_inited = 0;        /* Flag to avoid re-initializations */
 
 /* Global stuff for the team */
 static void *team_argument;            /* The argument each thread must init */
 
 pid_t *p;
-volatile int flag = 0;
+volatile int finished_flag = 0;        /* TRUE notifies that we are done */
 
-pthread_mutex_t count_mutex1, count_mutex2;
-pthread_cond_t flag1, flag2;
+pthread_mutex_t waitforparallel_lock, paralleldone_lock;
+pthread_cond_t waitforparallel_cv, paralleldone_cv;
 
-int number_of_process;
-int ort_argc;
+int  process_num;
+int  ort_argc;
 char **ort_argv;
+
 
 int oprc_pid() {return (0);}
 
-int pfork(int N)
+
+static int pfork(int N)
 {
 	int i = 0;
 
@@ -64,50 +71,39 @@ int pfork(int N)
 		if (fork() == 0) /* CHILD */
 			return (N);
 	}
-
 	return (0);        /* PARENT */
 }
+
 
 void oprc_shmfree(int *p)
 {
 	if (shmctl(*p, IPC_RMID, 0) == -1)
-	{
-		printf("Shared Memory Free error\n");
-		exit(0);
-	}
+		ort_error(0, "shmem free failed\n");
 }
+
 
 void oprc_shmalloc(void **p , size_t size, int *memid)
 {
 	*memid = shmget(IPC_PRIVATE, size, 0600 | IPC_CREAT);
-
 	if (*memid == -1)
-	{
-		printf("Shared Memory allocation error\n");
-		exit(0);
-	}
-
+		ort_error(0, "shmem allocation failed\n");
 	*p = shmat(*memid, 0, 0);
 	if (p == (void **) - 1)
-	{
-		printf("Shared Memory attach error\n");
-		exit(0);
-	}
+		ort_error(0, "shmem attach failed\n");
 }
 
 
-/* Library initialization.
- */
 int oprc_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 {
 	pid_t id;
 	int   nthr;
 
-	oprc_shmalloc((void **)&number_of_lock, (size_t)sizeof(int),
-	              (int *) &number_of_lock_id);
-	oprc_shmalloc((void **)&slock, (size_t)100 * sizeof(oprc_lock_t),
+	/* Allocate space for a maximum allowable number of locks */
+	oprc_shmalloc((void **) &lock_counter, (size_t)sizeof(int),
+	              (int *) &lock_counter_id);
+	oprc_shmalloc((void **) &slock, (size_t) MAXSHMLOCKS * sizeof(oprc_lock_t),
 	              (int *) &slock_id);
-	*number_of_lock = 0;
+	*lock_counter = 0;
 
 	nthr = (icv->nthreads > 0) ?  /* Explicitely requested population */
 	       icv->nthreads :
@@ -117,32 +113,47 @@ int oprc_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 	caps->supports_nested_nondynamic = 0;
 	caps->max_levels_supported       = 1;
 	caps->default_numthreads         = nthr;
-	caps->max_threads_supported      = -1;     /* No limit */
+	caps->max_threads_supported      = 1 << 30;     /* No limit */
+	caps->supports_proc_binding      = 0;
 
-	if (proc_lib_inited) return (0);
+	if (eeproc_inited) return (0);
 
-	proc_lib_inited = 1;
+	   eeproc_inited = 1;
 	return (0);
 }
 
+
 void oprc_finalize(int exitvalue)
 {
-	flag = 1;
+	finished_flag = 1;
 	FENCE;
-
-	pthread_mutex_lock(&count_mutex1);
-	pthread_cond_signal(&flag1);
-	pthread_mutex_unlock(&count_mutex1);
+	pthread_mutex_lock(&waitforparallel_lock);
+	pthread_cond_signal(&waitforparallel_cv);
+	pthread_mutex_unlock(&waitforparallel_lock);
 }
 
-/* Request for "numthr" threads to execute parallelism in nest
- * level "level".
- * We only support 1 level of parallelism, so we always return 0
- * if level > 1
+
+/* Request for "numthr" threads to execute parallelism in level "level".
+ * We only support 1 level of parallelism.
  */
-int oprc_request(int numthr, int level)
+int oprc_request(int numthr, int level, int oversubscribe)
 {
 	return ((level == 1) ? numthr : 0);
+}
+
+
+void oprc_create(int numthr, int level, void *arg, void **ignore)
+{
+	if (numthr <= 0 || level > 1) return;
+
+	process_num = numthr;
+	team_argument = arg;
+	pthread_mutex_lock(&waitforparallel_lock);
+	pthread_mutex_lock(&paralleldone_lock);
+	pthread_cond_signal(&waitforparallel_cv);    /* Wake up the initial thread */
+	pthread_mutex_unlock(&waitforparallel_lock);
+	pthread_cond_wait(&paralleldone_cv, &paralleldone_lock);
+	pthread_mutex_unlock(&paralleldone_lock);
 }
 
 
@@ -152,8 +163,26 @@ int oprc_request(int numthr, int level)
 void oprc_waitall(void **ignore)
 {
 	int i;
-	for (i = 0; i < number_of_process; i++)
-		wait(0);
+	for (i = 0; i < process_num; i++)
+		wait(NULL);
+}
+
+
+int oprc_bindme(int **places, int pindex)
+{
+	return (-1); /* Binding is unavailable */
+}
+
+
+int oprc_getselfid(void)
+{
+        return getpid();
+}
+
+
+void *oprc_getself(unsigned int *size)
+{
+        return NULL;
 }
 
 
@@ -163,12 +192,13 @@ void oprc_waitall(void **ignore)
  *                                                                 *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+
 void *oprc_init_lock(oprc_lock_t *lock, int type)
 {
 	if (lock == (oprc_lock_t *) - 1)
 	{
-		lock = (slock + (*number_of_lock));
-		*number_of_lock = ((*number_of_lock) + 1) % 100;
+		lock = (slock + (*lock_counter));
+		*lock_counter = ((*lock_counter) + 1) % 100;
 		FENCE;
 	}
 
@@ -189,10 +219,12 @@ void *oprc_init_lock(oprc_lock_t *lock, int type)
 	}
 }
 
+
 int oprc_destroy_lock(oprc_lock_t *lock)
 {
 	return 0;
 }
+
 
 int oprc_set_lock(oprc_lock_t *lock)
 {
@@ -295,105 +327,86 @@ int oprc_test_lock(oprc_lock_t *lock)
 	}
 }
 
-void oprc_create(int numthr, int level, void *arg, void **ignore)
+
+/* The function of the runner thread */
+void *oprc__ompi_main(void *ignore)
 {
-	if (numthr <= 0) return;
-
-	number_of_process = numthr;
-	team_argument = arg;
-
-	pthread_mutex_lock(&count_mutex1);
-	pthread_mutex_lock(&count_mutex2);
-	pthread_cond_signal(&flag1);
-	pthread_mutex_unlock(&count_mutex1);
-
-	pthread_cond_wait(&flag2, &count_mutex2);
-	pthread_mutex_unlock(&count_mutex2);
-}
-
-extern int __ompi_main(int argc, char **argv);
-
-void oprc__ompi_main(void)
-{
+	extern int __ompi_main(int argc, char **argv);
 	__ompi_main(ort_argc, ort_argv);
+	return NULL;
 }
 
+
+/* main(): the initial thread
+ * It's sole purpose is to wait for parallel regions and then fork processes
+ * to execute the region. 
+ * It also creates the runner thread.
+ */
 int main(int argc, char **argv)
 {
-	ort_argc = argc;
-	ort_argv = argv;
 	pthread_attr_t tattr;
 	pthread_mutexattr_t mattr;
 	pthread_t tid;
 	int ret = 0, memid, id;
 	void *arg;
 
+	ort_argc = argc;
+	ort_argv = argv;
+	
 	pthread_mutexattr_init(&mattr);
 	pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
-	pthread_mutex_init(&count_mutex1, &mattr);
-	pthread_mutex_init(&count_mutex2, &mattr);
+	pthread_mutex_init(&waitforparallel_lock, &mattr);
+	pthread_mutex_init(&paralleldone_lock, &mattr);
+	pthread_cond_init(&waitforparallel_cv, NULL);
+	pthread_cond_init(&paralleldone_cv, NULL);
 
-	pthread_cond_init(&flag1, NULL);
-	pthread_cond_init(&flag2, NULL);
-
-	oprc_shmalloc((void **)&p, (size_t)1024 * 1024, (int *)&memid);
-
+	/* Allocate space for the runner's stack */
+	oprc_shmalloc((void **) &p, (size_t) 1024 * 1024, (int *) &memid);
 	ret = pthread_attr_init(&tattr);
 	if (ret)
-	{
-		printf("pthread_attr_init error\n");
-		exit(0);
-	}
-
+		ort_error(0, "pthread_attr_init error\n");
 	ret = pthread_attr_setstack(&tattr, p, 1024 * 1024);
 	if (ret)
-	{
-		printf("pthread_attr_setstackaddr error\n");
-		exit(0);
-	}
+		ort_error(0, "pthread_attr_setstackaddr error\n");
 
-	pthread_mutex_lock(&count_mutex1);
-
-	ret = pthread_create(&tid, &tattr, (void *)oprc__ompi_main, NULL);
+	/* Create the runner thread to execute the original main */
+	pthread_mutex_lock(&waitforparallel_lock);
+	ret = pthread_create(&tid, &tattr, oprc__ompi_main, NULL);
 	if (ret != 0)
-	{
-		printf("pthread_create error %d\n", ret);
-		exit(0);
-	}
+		ort_error(0, "pthread_create error %d\n", ret);
 
-	while (flag == 0)
+	while (!finished_flag)
 	{
-		pthread_cond_wait(&flag1, &count_mutex1);
-		pthread_mutex_unlock(&count_mutex1);
+		/* Block till the next parallel region */
+		pthread_cond_wait(&waitforparallel_cv, &waitforparallel_lock);
+		pthread_mutex_unlock(&waitforparallel_lock);
 		FENCE;
 
-		if (flag == 0)
+		if (!finished_flag)
 		{
-			id = pfork(number_of_process);
-
+			id = pfork(process_num);             /* fork; all children will execute */
 			if (id != 0)
 			{
-				/* Execute requested code */
-				ort_ee_dowork(id, team_argument);
+				ort_ee_dowork(id, team_argument);  /* execute the requested code */
 				exit(0);
 			}
 		}
-		pthread_mutex_lock(&count_mutex2);
-		pthread_mutex_lock(&count_mutex1);
-		pthread_cond_signal(&flag2);
-		pthread_mutex_unlock(&count_mutex2);
+		pthread_mutex_lock(&paralleldone_lock);
+		pthread_mutex_lock(&waitforparallel_lock);
+		pthread_cond_signal(&paralleldone_cv);            /* wakeup the runner thread */
+		pthread_mutex_unlock(&paralleldone_lock);
 	}
 
 	oprc_shmfree(&memid);
-	oprc_shmfree(&number_of_lock_id);
+	oprc_shmfree(&lock_counter_id);
 	oprc_shmfree(&slock_id);
 
 	pthread_attr_destroy(&tattr);
-	pthread_mutex_destroy(&count_mutex1);
-	pthread_mutex_destroy(&count_mutex2);
+	pthread_mutex_destroy(&waitforparallel_lock);
+	pthread_mutex_destroy(&paralleldone_lock);
 
-	pthread_cond_destroy(&flag1);
-	pthread_cond_destroy(&flag2);
+	pthread_cond_destroy(&waitforparallel_cv);
+	pthread_cond_destroy(&paralleldone_cv);
 
 	exit(0);
 }

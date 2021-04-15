@@ -17,16 +17,18 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-/* str.h -- A simple streaming string structure. */
+/* str.h -- A simple streaming string structure by PPG */
 
 /* A dynamically growing string structure with a simple file-like interface.
  * You can keep str_printf()'ing to it oblivioulsy, you can seek/truncate etc.
  * You str_free() it at the end.
  * You can always get the actual string by str_string().
  * Take care NOT to touch the returned thing.
+ * 
+ * Designed and implemented by the OMPi team, PPG.
  */
 
 #ifndef __STR_H__

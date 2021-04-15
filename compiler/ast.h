@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* AST - the Abstract Syntax Tree */
@@ -34,9 +34,11 @@ typedef struct astexpr_   *astexpr;
 typedef struct astspec_   *astspec;
 typedef struct astdecl_   *astdecl;
 typedef struct aststmt_   *aststmt;
-typedef struct ompcon_    *ompcon;       /* OpenMP construct */
-typedef struct ompdir_    *ompdir;       /* OpenMP directive */
-typedef struct ompclause_ *ompclause;    /* OpenMP clause */
+typedef struct ompcon_    *ompcon;    /* OpenMP construct */
+typedef struct ompdir_    *ompdir;    /* OpenMP directive */
+typedef struct ompclause_ *ompclause; /* OpenMP clause */
+typedef struct ompxli_    *ompxli;    /* Extended list items (array sections) */
+typedef struct omparrdim_ *omparrdim;
 
 typedef struct oxclause_ *oxclause;    /* OMPi-extension clause */
 typedef struct oxcon_    *oxcon;       /* -"- construct */
@@ -50,12 +52,18 @@ typedef struct oxdir_    *oxdir;       /* -"- directive */
 extern void ast_stmt_parent(aststmt parent, aststmt t);
 extern void ast_parentize(aststmt tree);
 
+/* Add a statement before another statement in-place */
+void ast_stmt_prepend(aststmt where, aststmt what);
+/* Add a statement after another statement in-place */
+void ast_stmt_append(aststmt where, aststmt what);
 /* Given any statement, get the function node it belongs to */
 extern aststmt ast_get_enclosing_function(aststmt t);
 /* Inserts a statement after the declaration section in a compound */
 extern void ast_compound_insert_statement(aststmt tree, aststmt t);
 /* Transforms a BlockList tree to an equivallent right-ward path */
 extern void ast_linearize(aststmt tree);
+/* Prepends a specifier to a declaration or function definition statement */
+extern void ast_declordef_addspec(aststmt orig, astspec spec);
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -177,6 +185,22 @@ extern astexpr TypeTrick(astdecl d);
                                            a \
                                          )
 #define        NullExpr()                CastVoidStar(numConstant(0))
+#define        Deref(a)                  UnaryOperator(UOP_star,a)
+#define        DerefParen(a)             Deref(Parenthesis(a))
+
+#define Comma2(a,b)         CommaList((a),(b))
+#define Comma3(a,b,c)       Comma2((a),Comma2((b),(c)))
+#define Comma4(a,b,c,d)     Comma2(Comma2((a),(b)),Comma2((c),(d)))
+#define Comma5(a,b,c,d,e)   Comma2(Comma2((a),(b)),Comma3((c),(d),(e)))
+#define Comma6(a,b,c,d,e,f) Comma2(Comma3((a),(b),(c)),Comma3((d),(e),(f)))
+#define Comma7(a,b,c,d,e,f,g) \
+                            Comma2(Comma3((a),(b),(c)),Comma4((d),(e),(f),(g)))
+#define Comma8(a,b,c,d,e,f,g,h) \
+                        Comma2(Comma4((a),(b),(c),(d)),Comma4((e),(f),(g),(h)))
+
+
+/* Find the number of elements in a list (1 if not a COMMA/SPACE LIST) */
+extern int expr_list_cardinality(astexpr expr);
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -230,7 +254,8 @@ extern astexpr TypeTrick(astdecl d);
 extern char *SPEC_symbols[28];
 
 /* All declaration specifier node types */
-enum spectype { SPEC = 1, STCLASSSPEC, USERTYPE, SUE, ENUMERATOR, SPECLIST } ;
+enum spectype { SPEC = 1, STCLASSSPEC, USERTYPE, SUE, ENUMERATOR, SPECLIST,
+                ATTRSPEC } ;
 
 struct astspec_
 {
@@ -238,6 +263,7 @@ struct astspec_
 	int           subtype;
 	symbol        name;        /* For SUE/enumlist name/user types */
 	astspec       body;        /* E.g. for SUE fields, lists */
+	astspec       sueattr;     /* For SUE attributes */
 	union
 	{
 		astexpr     expr;        /* For enum list */
@@ -252,11 +278,12 @@ struct astspec_
 extern astspec Specifier(enum spectype type, int subtp, symbol name, astspec d);
 extern astspec Enumerator(symbol name, astexpr expr);
 extern astspec Specifierlist(int type, astspec e, astspec l);
-extern astspec SUdecl(int type, symbol sym, astdecl decl);
+extern astspec SUdecl(int type, symbol sym, astdecl decl, astspec attr);
+extern astspec Enumdecl(symbol sym, astspec body, astspec attr);
+extern astspec AttrSpec(char *s);
 #define        Declspec(type)          Specifier(SPEC,type,NULL,NULL)
 #define        StClassSpec(type)       Specifier(STCLASSSPEC, type, NULL, NULL)
 #define        Usertype(sym)           Specifier(USERTYPE,0,sym,NULL)
-#define        Enumdecl(sym,body)      Specifier(SUE,SPEC_enum,sym,body)
 #define        Speclist_right(e,l)     Specifierlist(SPEC_Rlist,e,l)
 #define        Speclist_left(l,e)      Specifierlist(SPEC_Llist,e,l)
 #define        Enumbodylist(l,e)       Specifierlist(SPEC_enum,e,l)
@@ -318,11 +345,20 @@ extern astdecl Declanylist(int subtype, astdecl l, astdecl e);
  * Stuff related to declarated symbols
  */
 
+#define        decl_getidentifier_symbol(d) ( decl_getidentifier(d)->u.id )
 extern astdecl decl_getidentifier(astdecl d);
+extern astdecl decl_topointer(astdecl d);
+extern astdecl decl_rename(astdecl d, symbol newname);
 extern int     decl_getkind(astdecl d);         /* DFUNC/DARRAY/DIDENT */
 extern int     decl_ispointer(astdecl d);
-#define        decl_getidentifier_symbol(d) ( decl_getidentifier(d)->u.id )
+extern int     func_returnspointer(astdecl d);
+extern void    decl_ptr2arr(astdecl d, astexpr size);
+extern void    decl_arr2ptr(astdecl d);
 extern astspec speclist_getspec(astspec s, int type, int subtype);
+/* Find the number of top-level elements in an initializer (DINIT) */
+extern int     decl_initializer_cardinality(astdecl decl);
+/* Gets/sets the size of a given array dimension from the array declaration */
+extern astexpr decl_array_dimension_size(astdecl arr,int dimidx,astexpr newxpr);
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -335,8 +371,25 @@ extern astspec speclist_getspec(astspec s, int type, int subtype);
 /* All statement types */
 enum stmttype { JUMP = 1, ITERATION, SELECTION, LABELED, EXPRESSION,
                 DECLARATION, COMPOUND, STATEMENTLIST, FUNCDEF, OMPSTMT,
-                VERBATIM, OX_STMT
+                VERBATIM, ASMSTMT, OX_STMT
               };
+
+/* Structs for handling asm nodes */
+typedef struct asmop_ *asmop;
+struct asmop_ 
+{
+	astexpr symbolicname, var;
+	char    *constraint;      /* if NULL, it is a LIST */
+	asmop   next, op;           /* for lists */
+};
+typedef struct asmnode_ *asmnode;
+struct asmnode_ 
+{
+	char    *template;
+	astspec qualifiers;
+	astexpr clobbers, labels;
+	asmop   ins, outs;
+};
 
 struct aststmt_
 {
@@ -368,6 +421,7 @@ struct aststmt_
 		ompcon  omp;                  /* OpenMP construct node */
 		oxcon   ox;                   /* OMPi-extension node */
 		char    *code;                /* For verbatim nodes */
+		asmnode assem;                /* For asm statements */
 	} u;
 	int    l, c;                    /* Location in file (line, column) */
 	symbol file;
@@ -387,6 +441,7 @@ struct aststmt_
 #define SLABEL       10   /* Labeled */
 #define SCASE        11
 #define SDEFAULT     12
+#define SXTENDED     13   /* For non-goto extended asm */
 
 extern aststmt Statement(enum stmttype type, int subtype, aststmt body);
 extern aststmt Jumpstatement(int subtype, astexpr expr);
@@ -404,7 +459,9 @@ extern aststmt OmpStmt(ompcon omp);
 extern aststmt OmpixStmt(oxcon ox);
 extern aststmt Verbatim(char *code);       /* Uses it as is */
 extern aststmt verbit(char *format, ...);  /* Flexy way; includes strdup() */
-
+extern asmop   AsmOp(astexpr id, char *con, astexpr var, asmop op, asmop nxt);
+extern aststmt AsmStmt(int subtype, astspec qual, char *tpl, 
+                       asmop out, asmop in, astexpr clob, astexpr labs);
 #define Break()                  Jumpstatement(SBREAK, NULL)
 #define Continue()               Jumpstatement(SCONTINUE, NULL)
 #define Return(n)                Jumpstatement(SRETURN, n)
@@ -421,6 +478,17 @@ extern aststmt verbit(char *format, ...);  /* Flexy way; includes strdup() */
 #define AssignStmt(to, from)     Expression(Assignment(to, ASS_eq, from))
 #define FuncCallStmt(a,b)        Expression(FunctionCall(a,b))
 
+#define Block2(a,b)         BlockList((a),(b))
+#define Block3(a,b,c)       Block2((a),Block2((b),(c)))
+#define Block4(a,b,c,d)     Block2(Block2((a),(b)),Block2((c),(d)))
+#define Block5(a,b,c,d,e)   Block2(Block2((a),(b)),Block3((c),(d),(e)))
+#define Block6(a,b,c,d,e,f) Block2(Block3((a),(b),(c)),Block3((d),(e),(f)))
+
+#define BasicAsm(q,t)           AsmStmt(SDEFAULT,q,t,NULL,NULL,NULL,NULL)
+#define XtendAsm(q,t,o,i,c)     AsmStmt(SXTENDED,q,t,o,i,c,NULL)
+#define XtendAsmGoto(t,i,c,l)   AsmStmt(SGOTO,NULL,t,NULL,i,c,l)
+#define XAsmOperand(i,c,v)      AsmOp(i,c,v,NULL,NULL)
+#define XAsmOpList(l,n)         AsmOp(NULL,NULL,NULL,n,l)
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -435,7 +503,7 @@ extern aststmt verbit(char *format, ...);  /* Flexy way; includes strdup() */
  * but is very helpful when analyzing variables that are both
  * first- and last-private.
  */
-enum clausetype
+typedef enum clausetype
 {
 	OCNOCLAUSE = 0, OCNOWAIT, OCIF, OCNUMTHREADS, OCORDERED, OCSCHEDULE,
 	OCCOPYIN, OCPRIVATE, OCCOPYPRIVATE, OCFIRSTPRIVATE, OCLASTPRIVATE, OCSHARED,
@@ -446,31 +514,74 @@ enum clausetype
 	OCFINAL, OCMERGEABLE,
 	/* OpenMP 4.0 */
 	OCPROCBIND, OCMAP, OCDEVICE, OCTO, OCFROM, OCPARALLEL, OCSECTIONS, OCFOR,
-	OCTASKGROUP, OCAUTO /* Clause added for Aggelo's auto scoping */
-};
+	OCTASKGROUP, OCDEPEND, OCNUMTEAMS, OCTHREADLIMIT,
+	/* OpenMP 4.5 */
+	OCHINT, OCPRIORITY, OCISDEVPTR, OCUSEDEVPTR, OCTHREADS, OCLINK,
+	OCDEFAULTMAP, OCORDEREDNUM,
+	/* Clause added for Aggelo's auto scoping */
+	OCAUTO 
+} ompclt_e;
 extern char *clausenames[];
 
 /* Clause subtypes */
-enum clausesubt
+typedef enum clausesubt
 {
+	OC_DontCare = -1,  /* no subtype given */ 
 	OC_static = 0, OC_dynamic, OC_guided, OC_runtime, OC_defshared, OC_defnone,
 	OC_plus, OC_times, OC_minus, OC_band, OC_bor, OC_xor, OC_land, OC_lor,
 	OC_affinity, OC_auto, OC_min, OC_max,
 	/* OpenMP 4.0 */
 	OC_bindmaster, OC_bindclose, OC_bindspread, OC_alloc, OC_to, OC_from,
-	OC_tofrom
-};
+	OC_tofrom, OC_in, OC_out, OC_inout,
+	/* OpenMP 4.5 */
+	OC_source, OC_sink, OC_release, OC_delete,
+	/* OpenMP 5.1 */
+	OC_bindprimary
+} ompclsubt_e;
 extern char *clausesubs[];
 
+/* Clause modifiers (>= v45) */
+typedef enum clausemodt
+{
+	OCM_none = 0,  /* never change this */
+	/* OpenMP 4.5 modifiers */
+	OCM_always, OCM_monotonic, OCM_nonmonotonic, OCM_simd,
+	OCM_parallel, OCM_task, OCM_target, OCM_targetdata,
+	OCM_targetenterdata, OCM_targetexitdata, OCM_targetupdate, OCM_cancel
+} ompclmod_e;
+extern char *clausemods[];
+
+/* Extended list items (plain identifier or array section) */
+enum ompxli_type { OXLI_IDENT, OXLI_ARRSEC };
+
+struct omparrdim_
+{
+	astexpr   lb;
+	astexpr   len;
+	omparrdim next;
+};
+
+struct ompxli_
+{
+	enum ompxli_type xlitype;
+	symbol           id;        /* The identifier */
+	omparrdim        dim;       /* List of dimensions */
+	ompxli           next;      /* Lists of such items */
+	int    l, c;                /* Location in file (line, column) */
+	symbol file;
+};
+	
 struct ompclause_
 {
-	enum clausetype  type;
-	enum clausesubt  subtype;
-	ompdir           parent;       /* The directive the clause belongs to */
+	ompclt_e    type;
+	ompclsubt_e subtype;
+	ompclmod_e  modifier;        /* Added in OpenMP4.5 */
+	ompdir      parent;          /* The directive the clause belongs to */
 	union
 	{
-		astexpr  expr;
-		astdecl  varlist;
+		astexpr expr;
+		astdecl varlist;
+		ompxli  xlist;
 		struct
 		{
 			ompclause elem;
@@ -481,22 +592,36 @@ struct ompclause_
 	symbol file;
 };
 
-ompclause OmpClause(enum clausetype typ, enum clausesubt subtype, astexpr expr,
-                    astdecl vlist);
+ompclause OmpClause(ompclt_e typ, ompclsubt_e subtype, ompclmod_e mod,
+                    astexpr expr, astdecl vlist);
 ompclause OmpClauseList(ompclause next, ompclause elem);
-#define VarlistClause(type,varlist) OmpClause(type,0,NULL,varlist)
-#define ReductionClause(op,varlist) OmpClause(OCREDUCTION,op,NULL,varlist)
-#define DefaultClause(what)         OmpClause(OCDEFAULT,what,NULL,NULL)
-#define PlainClause(type)           OmpClause(type,0,NULL,NULL)
-#define IfClause(expr)              OmpClause(OCIF,0,expr,NULL)
-#define NumthreadsClause(expr)      OmpClause(OCNUMTHREADS,0,expr,NULL)
-#define ScheduleClause(kind,expr)   OmpClause(OCSCHEDULE,kind,expr,NULL)
-#define CollapseClause(num)         OmpClause(OCCOLLAPSE,num,NULL,NULL)
-#define FinalClause(expr)           OmpClause(OCFINAL,0,expr,NULL)
+ompclause OmpXlistClause(ompclt_e typ, ompclsubt_e subt, ompclmod_e mod, 
+                         ompxli xlist);
+omparrdim OmpArrDim(astexpr lb, astexpr len);
+ompxli    OmpXLItem(enum ompxli_type type, symbol id, omparrdim dim);
+#define VarlistClause(type,varlist) OmpClause(type,0,OCM_none,NULL,varlist)
+#define DefaultClause(what)         OmpClause(OCDEFAULT,what,OCM_none,NULL,NULL)
+#define PlainClause(type)           OmpClause(type,0,OCM_none,NULL,NULL)
+#define IfClause(expr,mod)          OmpClause(OCIF,0,mod,expr,NULL)
+#define NumthreadsClause(expr)      OmpClause(OCNUMTHREADS,0,OCM_none,expr,NULL)
+#define ScheduleClause(kind,mod,xp) OmpClause(OCSCHEDULE,kind,mod,xp,NULL)
+#define CollapseClause(num)         OmpClause(OCCOLLAPSE,num,OCM_none,NULL,NULL)
+#define FinalClause(expr)           OmpClause(OCFINAL,0,OCM_none,expr,NULL)
 /* OpenMP V4.0 */
-#define ProcBindClause(what)        OmpClause(OCPROCBIND,what,NULL,NULL)
-#define MapClause(type,varlist)     OmpClause(OCMAP,type,NULL,varlist)
-#define DeviceClause(expr)          OmpClause(OCDEVICE,0,expr,NULL)
+#define ReductionClause(op,xlist)   OmpXlistClause(OCREDUCTION,op,0,xlist)
+#define ProcBindClause(what)        OmpClause(OCPROCBIND,what,0,NULL,NULL)
+#define DeviceClause(expr)          OmpClause(OCDEVICE,0,OCM_none,expr,NULL)
+#define ArraySection(id,dim)        OmpXLItem(OXLI_ARRSEC,id,dim)
+#define PlainXLI(id)                OmpXLItem(OXLI_IDENT,id,NULL)
+#define DependClause(way,xlist)     OmpXlistClause(OCDEPEND,way,OCM_none,xlist)
+#define MapClause(type,mod,xlist)   OmpXlistClause(OCMAP,type,mod,xlist)
+#define UpdateClause(type,xlist)    OmpXlistClause(type,OC_DontCare,0,xlist)
+#define NumteamsClause(expr)        OmpClause(OCNUMTEAMS,0,OCM_none,expr,NULL)
+#define ThreadlimitClause(expr)     OmpClause(OCTHREADLIMIT,0,0,expr,NULL)
+/* OpenMP V4.5 */
+#define HintClause(expr)            OmpClause(OCHINT,0,0,expr,NULL)
+#define PriorityClause(expr)        OmpClause(OCPRIORITY,0,OCM_none,expr,NULL)
+#define OrderedNumClause(num)       OmpClause(OCORDEREDNUM,num,OCM_none,NULL,NULL)
 
 /* directive/construct types */
 enum dircontype { DCPARALLEL = 1, DCFOR, DCSECTIONS, DCSECTION,
@@ -506,8 +631,11 @@ enum dircontype { DCPARALLEL = 1, DCFOR, DCSECTIONS, DCSECTION,
                   DCTASK, DCTASKWAIT, /* OpenMP 3.0 */
                   DCTASKYIELD,        /* OpenMP 3.1 */
                   /* OpenMP 4.0 */
-                  DCTARGET, DCTARGETDATA, DCTARGETUPD, DCDECLTARGET, DCCANCEL,
-                  DCCANCELLATIONPOINT, DCTASKGROUP
+                  DCTARGET, DCTARGETDATA, DCTARGETUPD, DCDECLTARGET, 
+                  DCCANCEL, DCCANCELLATIONPOINT, DCTASKGROUP,
+                  DCTEAMS, DCTARGETTEAMS,
+                  /* OpenMP 4.5 */
+                  DCTARGENTERDATA, DCTARGEXITDATA
                 };
 extern char *ompdirnames[];
 
@@ -526,7 +654,7 @@ struct ompdir_
 };
 
 extern ompdir OmpDirective(enum dircontype type, ompclause cla);
-extern ompdir OmpCriticalDirective(symbol r);
+extern ompdir OmpCriticalDirective(symbol r, ompclause cla);
 extern ompdir OmpFlushDirective(astdecl a);
 extern ompdir OmpThreadprivateDirective(astdecl a);
 
@@ -547,6 +675,8 @@ extern ompcon OmpConstruct(enum dircontype type, ompdir dir, aststmt body);
  */
 extern ompcon ast_get_enclosing_ompcon(aststmt t, enum dircontype type);
 
+#define OMPCON_IS_STANDALONE(c) ((c)->body == NULL)
+
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                               *
@@ -559,9 +689,10 @@ extern ompcon ast_get_enclosing_ompcon(aststmt t, enum dircontype type);
 enum oxclausetype { OX_OCIN = 1, OX_OCOUT, OX_OCINOUT, OX_OCLIST,
                     OX_OCREDUCE, OX_OCATNODE, OX_OCATALL, OX_OCDETACHED,
                     OX_OCTIED, OX_OCUNTIED, OX_OCSTRIDE, OX_OCSTART,
-                    OX_OCSCOPE, OX_OCATWORKER
+                    OX_OCSCOPE, OX_OCATWORKER, OX_OCIF,
+					OX_OCLOCAL, OX_OCREMOTE, OX_OCHINTS
                   };
-extern char *oxclausenames[15];
+extern char *oxclausenames[19];
 
 struct oxclause_
 {
@@ -595,9 +726,11 @@ extern oxclause OmpixReductionClause(int op, astdecl varlist);
 extern oxclause OmpixScopeClause(int scope);
 #define OmpixAtnodeClause(expr) OmpixClause(OX_OCATNODE,NULL,expr)
 #define OmpixAtworkerClause(expr) OmpixClause(OX_OCATWORKER,NULL,expr)
+#define OmpixHintsClause(expr) OmpixClause(OX_OCHINTS,NULL,expr)
 #define OmpixPlainClause(type) OmpixClause(type, NULL, NULL)
 #define OmpixStrideClause(expr) OmpixClause(OX_OCSTRIDE,NULL,expr)
 #define OmpixStartClause(expr) OmpixClause(OX_OCSTART,NULL,expr)
+#define OmpixIfClause(expr) OmpixClause(OX_OCIF,NULL,expr)
 
 /* directive/construct types */
 enum oxdircontype { OX_DCTASKDEF = 1, OX_DCTASK, OX_DCTASKSYNC,

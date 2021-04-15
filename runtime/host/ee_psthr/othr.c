@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /*
@@ -144,9 +144,10 @@ int othr_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 	caps->supports_nested            = 1;
 	caps->supports_dynamic           = 1;
 	caps->supports_nested_nondynamic = 1;
-	caps->max_levels_supported       = -1;     /* No limit */
+	caps->max_levels_supported       = 1 << 30; /* No limit */
 	caps->default_numthreads         = nthr;
-	caps->max_threads_supported      = -1;     /* No limit */
+	caps->max_threads_supported      = 1 << 30; /* No limit */
+	caps->supports_proc_binding      = 0;
 
 	if (psthread_lib_inited) return (0);
 
@@ -299,7 +300,7 @@ void threadjob(void *env)
 }
 
 /* Request for "numthr" threads to execute parallelism in level "level" */
-int othr_request(int numthr, int level)
+int othr_request(int numthr, int level, int oversubscribe)
 {
 	int res, tmp;
 	int omp_get_dynamic();
@@ -592,6 +593,23 @@ void othr_waitall(void **info)
 }
 
 
+int othr_bindme(int **places, int pindex)
+{
+	return (-1); /* Binding is unavailable */
+}
+
+
+int othr_getselfid(void)
+{
+        return (-1); // Invalid ID
+}
+
+
+void *othr_getself(unsigned int *size)
+{
+        return NULL;
+}
+
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                                 *
@@ -793,19 +811,19 @@ void ppf(void *vti, int n)
 }
 #endif
 
-void othr_barrier_init(othr_barrier_t *bar, int n)
+void othr_barrier_init(othr_barrier_t **barp, int n)
 {
 #if defined(OTHR_TASKS) && !defined(OTHR_DUMMY_TASKS)
 	ort_task_node_t *tw;
 	tw = psthread_getspecific(task_key);
 #endif
 
-	psthread_barrier_init_ex(bar, n);
+	psthread_barrier_init_ex(*barp, n);
 
 #if defined(OTHR_TASKS) && !defined(OTHR_DUMMY_TASKS)
-	bar->aux = tw->info;
+	(*barp)->aux = tw->info;
 #if defined(IMPLICIT_TASKS_FIRST)
-	bar->ppf = ppf;
+	(*barp)->ppf = ppf;
 #endif
 #endif
 }
@@ -841,9 +859,9 @@ void othr_barrier_wait(othr_barrier_t *bar, int id)
 #endif
 }
 
-void othr_barrier_destroy(othr_barrier_t *bar)
+void othr_barrier_destroy(othr_barrier_t **barp)
 {
-	psthread_barrier_destroy_ex(bar);
+	psthread_barrier_destroy_ex(*barp);
 }
 #endif
 

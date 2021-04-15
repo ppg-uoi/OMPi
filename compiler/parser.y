@@ -18,7 +18,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* parser.y */
@@ -41,14 +41,16 @@
 #include <ctype.h>
 #include <assert.h>
 #include "scanner.h"
-#include "boolean.h"
 #include "ompi.h"
 #include "ast.h"
 #include "symtab.h"
 #include "ast_free.h"
 #include "ast_copy.h"
 #include "ast_vars.h"
+#include "ast_print.h"
 #include "x_arith.h"
+#include "x_clauses.h"
+#include "str.h"
 
 void    check_uknown_var(char *name);
 void    parse_error(int exitvalue, char *format, ...);
@@ -57,6 +59,9 @@ void    yyerror(const char *s);
 void    check_for_main_and_declare(astspec s, astdecl d);
 void    add_declaration_links(astspec s, astdecl d);
 astdecl fix_known_typename(astspec s);
+void    check_schedule(ompclsubt_e sched, ompclmod_e mod);
+char    *strdupcat(char *first, char *second, int freethem);
+
 
 aststmt pastree = NULL;       /* The generated AST */
 aststmt pastree_stmt = NULL;  /* For when parsing statment strings */
@@ -86,19 +91,24 @@ int     errorOnReturn = 0;
   astspec   spec;        /* A declaration specifier node in the AST */
   astdecl   decl;        /* A declarator node in the AST */
   aststmt   stmt;        /* A statement node in the AST */
+  asmop     asmo;        /* An asm operand */
   ompcon    ocon;        /* An OpenMP construct */
   ompdir    odir;        /* An OpenMP directive */
   ompclause ocla;        /* An OpenMP clause */
+  omparrdim oasd;        /* An array section dimension/slice */
+  ompxli    oxli;        /* OpenMP extended list items (ids/array secitons) */
 
   oxcon     xcon;        /* OMPi extensions */
   oxdir     xdir;
   oxclause  xcla;
 }
 
-%error-verbose
+/* %error-verbose is deprecated */
+//%define parse.error verbose
 
-/* expect 3 shift/reduce & 1 reduce/reduce */
-/* %expect 3 */
+/* expect 2 shift/reduce & 1 reduce/reduce */
+/* %expect 2 */
+%right NOELSE ELSE  /* Right assoc. to fix if-then-else shift/reduce conflict */
 
 /* Start-symbol tokens (trick from bison manual) */
 %token START_SYMBOL_EXPRESSION START_SYMBOL_BLOCKLIST START_SYMBOL_TRANSUNIT
@@ -122,7 +132,7 @@ int     errorOnReturn = 0;
 
 /* Hacks */
 %token <name> __BUILTIN_VA_ARG __BUILTIN_OFFSETOF __BUILTIN_TYPES_COMPATIBLE_P
-              __ATTRIBUTE__
+              __ATTRIBUTE__ __ASM__ PRAGMA_OTHER
 
 /* OpenMP tokens */
 %token <name> PRAGMA_OMP PRAGMA_OMP_THREADPRIVATE OMP_PARALLEL OMP_SECTIONS
@@ -145,6 +155,14 @@ int     errorOnReturn = 0;
 %token <name> OMP_DISTRIBUTE OMP_NUMTEAMS OMP_THREADLIMIT OMP_DISTSCHEDULE
 %token <name> OMP_DEPEND OMP_IN OMP_OUT OMP_INOUT OMP_TASKGROUP OMP_SEQ_CST
 %token <name> OMP_CANCEL OMP_INITIALIZER PRAGMA_OMP_CANCELLATIONPOINT
+       /* added @ OpenMP 4.5 */
+%token <name> OMP_HINT OMP_SOURCE OMP_SINK OMP_RELEASE OMP_DELETE OMP_ALWAYS
+%token <name> OMP_ENTER OMP_EXIT OMP_IS_DEVICE_PTR OMP_USE_DEVICE_PTR
+%token <name> OMP_PRIORITY OMP_TASKLOOP OMP_THREADS OMP_LINK OMP_DEFAULTMAP
+%token <name> OMP_SCALAR OMP_MONOTONIC OMP_NONMONOTONIC
+       /* added @ OpenMP 5.1 */
+%token <name> OMP_PRIMARY
+
 
 /* C non-terminals */
 %type <symb>   enumeration_constant
@@ -223,6 +241,24 @@ int     errorOnReturn = 0;
 %type <stmt>   oldstyle_function_definition
 %type <stmt>   declaration_list
 
+/* non-C */
+%type <expr>   labellist
+%type <expr>   asm_clobbers
+%type <asmo>   asm_inoperand
+%type <asmo>   asm_input
+%type <asmo>   asm_outoperand
+%type <asmo>   asm_output
+%type <spec>   asm_qualifier
+%type <spec>   asm_qualifiers
+%type <stmt>   asm_stmtrest
+%type <stmt>   asm_statement
+%type <spec>   attribute_optseq
+%type <spec>   attribute_seq
+%type <spec>   attribute
+%type <string> attribute_name_list
+%type <string> attribute_name
+%type <string> attr_name
+
 /* OpenMP non-terminals */
 %type <ocon>   openmp_construct
 %type <ocon>   openmp_directive
@@ -269,7 +305,7 @@ int     errorOnReturn = 0;
 %type <odir>   flush_directive
 %type <decl>   flush_vars
 %type <ocon>   ordered_construct
-%type <odir>   ordered_directive
+%type <odir>   ordered_directive_full
 %type <odir>   threadprivate_directive
 %type <ocla>   procbind_clause
 %type <decl>   variable_list
@@ -316,13 +352,13 @@ int     errorOnReturn = 0;
 %type <ocla>   target_data_clause
 %type <ocla>   device_clause
 %type <ocla>   map_clause
+%type <type>   map_modifier
 %type <type>   map_type
 %type <ocon>   target_construct
 %type <odir>   target_directive
 %type <ocla>   target_clause_optseq
 %type <ocla>   target_clause
 %type <ocla>   unique_target_clause
-%type <ocon>   target_update_construct
 %type <odir>   target_update_directive
 %type <ocla>   target_update_clause_seq
 %type <ocla>   target_update_clause
@@ -404,21 +440,76 @@ int     errorOnReturn = 0;
 %type <type>   reduction_identifier
 %type <type>   reduction_type_list // TODO
 %type <ocla>   initializer_clause_opt
+%type <ocla>   depend_clause
 %type <ocla>   if_clause
 %type <ocla>   collapse_clause
-%type <decl>   array_section
-%type <decl>   variable_array_section_list
-%type <decl>   array_section_plain
+%type <oxli>   variable_array_section_list
+%type <oxli>   varid_or_array_section
+%type <oasd>   array_section_slice_list
+%type <oasd>   array_section_slice
+    /* added @ OpenMP V4.5 */
+%type <odir>   ordered_directive_standalone
+%type <oxli>   funcname_variable_array_section_list
+%type <oxli>   funcvarid_or_array_section
+%type <odir>   declare_target_directive_v45
+%type <ocla>   declare_target_clause_optseq
+%type <ocla>   unique_declare_target_clause
+%type <odir>   target_enter_data_directive
+%type <ocla>   target_enter_data_clause_seq
+%type <ocla>   target_enter_data_clause
+%type <odir>   target_exit_data_directive
+%type <ocla>   target_exit_data_clause_seq
+%type <ocla>   target_exit_data_clause
+%type <ocla>   defaultmap_clause
+%type <ocla>   use_device_ptr_clause
+%type <ocla>   is_device_ptr_clause
+%type <type>   if_related_construct
+%type <ocla>   hint_clause
+%type <ocla>   ordered_clause_optseq_full
+%type <ocla>   ordered_clause_type_full
+%type <ocla>   ordered_clause_optseq_standalone
+%type <ocla>   ordered_clause_depend_sink
+%type <type>   schedule_mod
+%type <expr>   sink_vec
+%type <expr>   sink_vec_elem
+
+/* TODO
+%type <ocon>   taskloop_construct
+%type <odir>   taskloop_directive
+%type <ocon>   taskloop_simd_construct
+%type <odir>   taskloop_simd_directive
+
+%type <ocon>   target_parallel_construct
+%type <ocla>   target_parallel_clause_optseq
+%type <odir>   target_parallel_directive
+%type <ocla>   target_parallel_clause
+
+%type <ocon>   target_parallel_for_construct
+%type <ocla>   target_parallel_for_clause_optseq
+%type <odir>   target_parallel_for_directive
+%type <ocla>   target_parallel_for_clause
+
+%type <ocon>   target_parallel_for_simd_construct
+%type <ocla>   target_parallel_for_simd_clause_optseq
+%type <odir>   target_parallel_for_simd_directive
+%type <ocla>   target_parallel_for_simd_clause
+
+%type <ocon>   target_simd_construct
+%type <ocla>   target_simd_clause_optseq
+%type <odir>   target_simd_directive
+%type <ocla>   target_simd_clause
+*/
 
 /*
  * OMPi-extensions
  */
 
 /* Tokens */
-%token <name> PRAGMA_OMPIX OMPIX_TASKDEF OMPIX_IN OMPIX_OUT OMPIX_INOUT
+%token <name> PRAGMA_OMPIX OMPIX_TASKDEF
 %token <name> OMPIX_TASKSYNC OMPIX_UPONRETURN OMPIX_ATNODE OMPIX_DETACHED
 %token <name> OMPIX_ATWORKER OMPIX_TASKSCHEDULE OMPIX_STRIDE OMPIX_START
 %token <name> OMPIX_SCOPE OMPIX_NODES OMPIX_WORKERS OMPIX_LOCAL OMPIX_GLOBAL
+%token <name> OMPIX_HERE OMPIX_REMOTE OMPIX_HINTS
 %token <name> OMPIX_TIED
 
 /* Non-terminals */
@@ -434,7 +525,6 @@ int     errorOnReturn = 0;
 %type <xdir>   ox_task_directive
 %type <xcla>   ox_task_clause_optseq
 %type <xcla>   ox_task_clause
-%type <expr>   ox_funccall_expression
 %type <xdir>   ox_tasksync_directive
 %type <xdir>   ox_taskschedule_directive
 %type <xcla>   ox_taskschedule_clause_optseq
@@ -537,7 +627,7 @@ primary_expression:
           if (istp(e) && threadmode)
             chflag = true;
       }
-      $$ = chflag ? Parenthesis(UnaryOperator(UOP_star, Identifier(id)))
+      $$ = chflag ? Parenthesis(Deref(Identifier(id)))
                   : Identifier(id);
     }
   | CONSTANT
@@ -564,29 +654,18 @@ postfix_expression:
     {
       $$ = ArrayIndex($1, $3);
     }
-  /* The following 2 rules were added so that calling undeclared functions
+  /* The following rule was added so that calling undeclared functions
    * does not result in "unknown identifier" messages (it was matched by
    * the IDENTIFIER rule in primary_expression.
-   * They account for 2 shift/reduce conflicts.
+   * It accounts for 2 shift/reduce conflicts.
    * (VVD)
    */
-  | IDENTIFIER '(' ')'
-    {
-      /* Catch calls to "main()" (unlikely but possible) */
-      $$ = strcmp($1, "main") ?
-             FunctionCall(IdentName($1), NULL) :
-             FunctionCall(IdentName(MAIN_NEWNAME), NULL);
-    }
   | IDENTIFIER '(' argument_expression_list ')'
     {
       /* Catch calls to "main()" (unlikely but possible) */
       $$ = strcmp($1, "main") ?
              FunctionCall(IdentName($1), $3) :
              FunctionCall(IdentName(MAIN_NEWNAME), $3);
-    }
-  | postfix_expression '(' ')'
-    {
-      $$ = FunctionCall($1, NULL);
     }
   | postfix_expression '(' argument_expression_list ')'
     {
@@ -602,8 +681,8 @@ postfix_expression:
     }
     /* The next two are artificial rules, to cover the cases where
      * a struct field name is identical to one of user type names;
-     * the scanner returns TYPE_NAME in this case, which would causes
-     * a syntax error.
+     * the scanner returns TYPE_NAME in this case, which would otherwise 
+     * cause a syntax error.
      */
   | postfix_expression '.' typedef_name
     {
@@ -633,7 +712,11 @@ postfix_expression:
 
 /*  ISO/IEC 9899:1999 6.5.2 */
 argument_expression_list:
-    assignment_expression
+    // empty
+    {
+      $$ = NULL;
+    }
+  | assignment_expression
     {
       $$ = $1;
     }
@@ -1210,50 +1293,51 @@ type_specifier:
 ;
 
 /*  ISO/IEC 9899:1999 6.7.2.1 */
+/* We do not support after-the-closing-brace attributes */
 struct_or_union_specifier:
-    struct_or_union '{' struct_declaration_list '}'
+    struct_or_union attribute_optseq '{' struct_declaration_list '}'
     {
-      $$ = SUdecl($1, NULL, $3);
+      $$ = SUdecl($1, NULL, $4, $2);
     }
-  | struct_or_union '{' '}' /* NON-ISO empty declaration (added by SM) */
+  | struct_or_union attribute_optseq '{' '}' /* NON-ISO empty (added by SM) */
     {
-      $$ = SUdecl($1, NULL, NULL);
+      $$ = SUdecl($1, NULL, NULL, $2);
     }
-  | struct_or_union IDENTIFIER '{' struct_declaration_list '}'
+  | struct_or_union attribute_optseq IDENTIFIER '{' struct_declaration_list '}'
     {
-      symbol s = Symbol($2);
+      symbol s = Symbol($3);
       /* Well, struct & union names have their own name space, and
        * their own scopes. I.e. they can be re-declare in nested
        * scopes. We don't do any kind of duplicate checks.
        */
       if (checkDecls)
         symtab_put(stab, s, SUNAME);
-      $$ = SUdecl($1, s, $4);
+      $$ = SUdecl($1, s, $5, $2);
     }
   /* If we have "typedef struct X X;" then X will become a TYPE_NAME
    * from now on, altough it is also a SUNAME. Thus it won't be matched
    * by the previous rule -- this explains the following one!
    */
-  | struct_or_union typedef_name '{' struct_declaration_list '}'
+  | struct_or_union attribute_optseq typedef_name '{' struct_declaration_list '}'
     {
-      symbol s = $2;
+      symbol s = $3;
       if (checkDecls)
         symtab_put(stab, s, SUNAME);
-      $$ = SUdecl($1, s, $4);
+      $$ = SUdecl($1, s, $5, $2);
     }
-  | struct_or_union IDENTIFIER
+  | struct_or_union attribute_optseq IDENTIFIER
     {
-      symbol s = Symbol($2);
+      symbol s = Symbol($3);
       if (checkDecls)
         symtab_put(stab, s, SUNAME);
-      $$ = SUdecl($1, s, NULL);
+      $$ = SUdecl($1, s, NULL, $2);
     }
-  | struct_or_union typedef_name       /* As above! */
+  | struct_or_union attribute_optseq typedef_name       /* As above! */
     {
-      symbol s = $2;
+      symbol s = $3;
       if (checkDecls)
         symtab_put(stab, s, SUNAME);
-      $$ = SUdecl($1, s, NULL);
+      $$ = SUdecl($1, s, NULL, $2);
     }
 ;
 
@@ -1343,45 +1427,78 @@ struct_declarator:
 
 /*  ISO/IEC 9899:1999 6.7.2.2 */
 enum_specifier:
-    ENUM '{' enumerator_list '}'
+    ENUM attribute_optseq '{' enumerator_list '}'
     {
-      $$ = Enumdecl(NULL, $3);
+      $$ = Enumdecl(NULL, $4, $2);
     }
-  | ENUM IDENTIFIER '{' enumerator_list '}'
+  | ENUM attribute_optseq IDENTIFIER '{' enumerator_list '}'
     {
-      symbol s = Symbol($2);
+      symbol s = Symbol($3);
 
       if (checkDecls)
       {
         if (symtab_get(stab, s, ENUMNAME))
-          parse_error(-1, "enum name '%s' is already in use.", $2);
+          parse_error(-1, "enum name '%s' is already in use.", $3);
         symtab_put(stab, s, ENUMNAME);
       }
-      $$ = Enumdecl(s, $4);
+      $$ = Enumdecl(s, $5, $2);
     }
-  | ENUM '{' enumerator_list ',' '}'
+    /* Account for enum names that are identical to user type names */
+  | ENUM attribute_optseq typedef_name '{' enumerator_list '}'
     {
-      $$ = Enumdecl(NULL, $3);
-    }
-  | ENUM IDENTIFIER '{' enumerator_list ',' '}'
-    {
-      symbol s = Symbol($2);
+      symbol s = $3;
 
       if (checkDecls)
       {
         if (symtab_get(stab, s, ENUMNAME))
-          parse_error(-1, "enum name '%s' is already in use.", $2);
+          parse_error(-1, "enum name '%s' is already in use.", s->name);
         symtab_put(stab, s, ENUMNAME);
       }
-      $$ = Enumdecl(s, $4);
+      $$ = Enumdecl(s, $5, $2);
     }
-  | ENUM IDENTIFIER
+  | ENUM attribute_optseq '{' enumerator_list ',' '}'
+    {
+      $$ = Enumdecl(NULL, $4, $2);
+    }
+  | ENUM attribute_optseq IDENTIFIER '{' enumerator_list ',' '}'
+    {
+      symbol s = Symbol($3);
+
+      if (checkDecls)
+      {
+        if (symtab_get(stab, s, ENUMNAME))
+          parse_error(-1, "enum name '%s' is already in use.", $3);
+        symtab_put(stab, s, ENUMNAME);
+      }
+      $$ = Enumdecl(s, $5, $2);
+    }
+  | ENUM attribute_optseq typedef_name '{' enumerator_list ',' '}'
+    {
+      symbol s = $3;
+
+      if (checkDecls)
+      {
+        if (symtab_get(stab, s, ENUMNAME))
+          parse_error(-1, "enum name '%s' is already in use.", s->name);
+        symtab_put(stab, s, ENUMNAME);
+      }
+      $$ = Enumdecl(s, $5, $2);
+    }
+  | ENUM attribute_optseq IDENTIFIER
     {
       /*
       if (symtab_get(stab, s, ENUMNAME))
         parse_error(-1, "enum name '%s' is unknown.", $2);
       */
-      $$ = Enumdecl(Symbol($2), NULL);
+      $$ = Enumdecl(Symbol($3), NULL, $2);
+    }
+  | ENUM attribute_optseq typedef_name
+    {
+      /*
+      if (symtab_get(stab, s, ENUMNAME))
+        parse_error(-1, "enum name '%s' is unknown.", $2);
+      */
+      $$ = Enumdecl($3, NULL, $2);
     }
 ;
 
@@ -1422,6 +1539,10 @@ type_qualifier:
   | VOLATILE
     {
       $$ = Declspec(SPEC_volatile);
+    }
+  | attribute
+    {
+      $$ = $1;
     }
 ;
 
@@ -1786,6 +1907,10 @@ statement:
     {
       $$ = $1;
     }
+  | asm_statement    // Forced to add it (Nov. 2019)
+    {
+      $$ = $1;
+    }
   | openmp_construct // OpenMP Version 2.5 ISO/IEC 9899:1999 addition
     {
       $$ = OmpStmt($1);
@@ -1796,6 +1921,10 @@ statement:
       $$ = OmpixStmt($1);
       $$->l = $1->l;
     }
+  | PRAGMA_OTHER
+    {
+      $$ = Verbatim(strdup($1));
+    }    
 ;
 
 
@@ -1814,9 +1943,9 @@ statement_for_labeled:
 
 /*  ISO/IEC 9899:1999 6.8.1 */
 labeled_statement:             /* Allow openmp_directive for CASE and DEFAULT */
-    IDENTIFIER ':' statement
+    IDENTIFIER ':' attribute_optseq statement  /* attribute_optseq is gobbled */
     {
-      $$ = Labeled( Symbol($1), $3 );
+      $$ = Labeled( Symbol($1), $4 );
     }
   | CASE constant_expression ':' statement_for_labeled
     {
@@ -1893,7 +2022,7 @@ expression_statement:
 
 /*  ISO/IEC 9899:1999 6.8.4 */
 selection_statement:
-    IF '(' expression ')' statement
+    IF '(' expression ')' statement  %prec NOELSE // force right associativity
     {
       $$ = If($3, $5, NULL);
     }
@@ -2038,6 +2167,10 @@ external_declaration:
     {
       $$ = OmpixStmt($1);
     }
+  | PRAGMA_OTHER
+    {
+      $$ = Verbatim(strdup($1));
+    }
 ;
 
 /*  ISO/IEC 9899:1999 6.9.1 */
@@ -2053,10 +2186,19 @@ function_definition:
 normal_function_definition:
     declaration_specifiers declarator
     {
+      stentry f;
+      
       if (isTypedef || $2->decl->type != DFUNC)
         parse_error(1, "function definition cannot be parsed.\n");
-      if (symtab_get(stab, decl_getidentifier_symbol($2), FUNCNAME) == NULL)
-        symtab_put(stab, decl_getidentifier_symbol($2), FUNCNAME);
+      f = symtab_get(stab, decl_getidentifier_symbol($2), FUNCNAME);
+      if (f && f->funcdef)
+        parse_error(1, "function %s is multiply defined.\n", f->key->name);
+      if (f == NULL)
+      {
+        f = symtab_put(stab, decl_getidentifier_symbol($2), FUNCNAME);
+        f->spec = $1;
+        f->decl = $2;
+      }
 
       scope_start(stab);
       ast_declare_function_params($2);
@@ -2066,13 +2208,23 @@ normal_function_definition:
       scope_end(stab);
       check_for_main_and_declare($1, $2);
       $$ = FuncDef($1, $2, NULL, $4);
+      symtab_get(stab, decl_getidentifier_symbol($2), FUNCNAME)->funcdef = $$;
     }
   | declarator /* no return type */
     {
+      stentry f;
+      
       if (isTypedef || $1->decl->type != DFUNC)
         parse_error(1, "function definition cannot be parsed.\n");
-      if (symtab_get(stab, decl_getidentifier_symbol($1), FUNCNAME) == NULL)
-        symtab_put(stab, decl_getidentifier_symbol($1), FUNCNAME);
+      f = symtab_get(stab, decl_getidentifier_symbol($1), FUNCNAME);
+      if (f && f->funcdef)
+        parse_error(1, "function %s is multiply defined.\n", f->key->name);
+      if (f == NULL)
+      {
+        f = symtab_put(stab, decl_getidentifier_symbol($1), FUNCNAME);
+        f->spec = NULL;
+        f->decl = $1;
+      }
 
       scope_start(stab);
       ast_declare_function_params($1);
@@ -2080,20 +2232,34 @@ normal_function_definition:
     compound_statement
     {
       astspec s = Declspec(SPEC_int);  /* return type defaults to "int" */
-
+      stentry f;
+      
       scope_end(stab);
       check_for_main_and_declare(s, $1);
       $$ = FuncDef(s, $1, NULL, $3);
+      
+      f = symtab_get(stab, decl_getidentifier_symbol($1), FUNCNAME);
+      if (!f->spec) f->spec = s;
+      f->funcdef = $$;
     }
 ;
 
 oldstyle_function_definition:
     declaration_specifiers declarator /* oldstyle: params declared seperately */
     {
+      stentry f;
+      
       if (isTypedef || $2->decl->type != DFUNC)
         parse_error(1, "function definition cannot be parsed.\n");
-      if (symtab_get(stab, decl_getidentifier_symbol($2), FUNCNAME) == NULL)
-        symtab_put(stab, decl_getidentifier_symbol($2), FUNCNAME);
+      f = symtab_get(stab, decl_getidentifier_symbol($2), FUNCNAME);
+      if (f && f->funcdef)
+        parse_error(1, "function %s is multiply defined.\n", f->key->name);
+      if (f == NULL)
+      {
+        f = symtab_put(stab, decl_getidentifier_symbol($2), FUNCNAME);
+        f->spec = $1;
+        f->decl = $2;
+      }
 
       scope_start(stab);
       /* Notice here that the function parameters are declared through
@@ -2105,13 +2271,23 @@ oldstyle_function_definition:
       scope_end(stab);
       check_for_main_and_declare($1, $2);
       $$ = FuncDef($1, $2, $4, $5);
+      symtab_get(stab, decl_getidentifier_symbol($2), FUNCNAME)->funcdef = $$;
     }
   | declarator /* no return type & oldstyle: params declared seperately */
     {
+      stentry f;
+      
       if (isTypedef || $1->decl->type != DFUNC)
         parse_error(1, "function definition cannot be parsed.\n");
-      if (symtab_get(stab, decl_getidentifier_symbol($1), FUNCNAME) == NULL)
-        symtab_put(stab, decl_getidentifier_symbol($1), FUNCNAME);
+      f = symtab_get(stab, decl_getidentifier_symbol($1), FUNCNAME);
+      if (f && f->funcdef)
+        parse_error(1, "function %s is multiply defined.\n", f->key->name);
+      if (f == NULL)
+      {
+        f = symtab_put(stab, decl_getidentifier_symbol($1), FUNCNAME);
+        f->spec = NULL;
+        f->decl = $1;
+      }
 
       scope_start(stab);
       /* Notice here that the function parameters are declared through
@@ -2121,10 +2297,15 @@ oldstyle_function_definition:
     declaration_list compound_statement
     {
       astspec s = Declspec(SPEC_int);  /* return type defaults to "int" */
+      stentry f;
 
       scope_end(stab);
       check_for_main_and_declare(s, $1);
       $$ = FuncDef(s, $1, $3, $4);
+      
+      f = symtab_get(stab, decl_getidentifier_symbol($1), FUNCNAME);
+      if (!f->spec) f->spec = s;
+      f->funcdef = $$;
     }
 ;
 
@@ -2139,6 +2320,232 @@ declaration_list:
       $$ = BlockList($1, $2);         /* Same as block list */
     }
 ;
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *                                                               *
+ *     GCC EXTENSIONS RULES                                      *
+ *                                                               *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+/* -------------------------------------------------------------------------
+ * ------------ asm: we cannot live happily without it ---------------------
+ * -------------------------------------------------------------------------
+ */
+
+asm_statement:
+    __ASM__ asm_stmtrest 
+    {
+      ($$ = $2)->u.assem->qualifiers = NULL;
+    }
+  | __ASM__ asm_qualifiers asm_stmtrest 
+    {
+      ($$ = $3)->u.assem->qualifiers = $2;
+    }
+;
+
+asm_stmtrest:
+    '(' string_literal ')'
+    {
+      $$ = BasicAsm(NULL, $2);
+    }
+  | '(' string_literal ':' asm_output ')'
+    {
+      $$ = XtendAsm(NULL, $2, $4, NULL, NULL);
+    }
+  | '(' string_literal ':' asm_output ':' asm_input ')'
+    {
+      $$ = XtendAsm(NULL, $2, $4, $6, NULL);
+    }
+  | '(' string_literal ':' asm_output ':' asm_input ':' asm_clobbers ')'
+    {
+      $$ = XtendAsm(NULL, $2, $4, $6, $8);
+    }
+  | GOTO '(' string_literal ':' ':' asm_input ':' asm_clobbers ':' labellist ')'
+    {
+      $$ = XtendAsmGoto($3, $6, $8, $10);
+    }
+;
+
+asm_qualifiers:
+    asm_qualifier
+    {
+      $$ = $1;
+    }
+  | asm_qualifiers asm_qualifier
+    {
+      $$ = Speclist_right($1, $2);
+    }
+;
+
+asm_qualifier:
+    VOLATILE { $$ = Declspec(SPEC_volatile); }
+  | INLINE   { $$ = Declspec(SPEC_inline); }
+;
+
+asm_output:
+    {
+      $$ = NULL;
+    }
+  | asm_outoperand
+    {
+      $$ = $1;
+    }
+  | asm_output ',' asm_outoperand
+    {
+      $$ = XAsmOpList($1, $3);
+    }
+;
+
+asm_outoperand:
+    '[' IDENTIFIER ']' string_literal '(' unary_expression /* lvalue */ ')'
+    {
+      $$ = XAsmOperand(IdentName($2), $4, $6);
+    }
+  | string_literal '(' unary_expression /* lvalue */ ')'
+    {
+      $$ = XAsmOperand(NULL, $1, $3);
+    }
+;
+
+asm_input:
+    {
+      $$ = NULL;
+    }
+  | asm_inoperand
+    {
+      $$ = $1;
+    }
+  | asm_input ',' asm_inoperand
+    {
+      $$ = XAsmOpList($1, $3);
+    }
+;
+
+asm_inoperand:
+    '[' IDENTIFIER ']' string_literal '(' expression ')'
+    {
+      $$ = XAsmOperand(IdentName($2), $4, $6);
+    }
+  | string_literal '(' expression ')'
+    {
+      $$ = XAsmOperand(NULL, $1, $3);
+    }
+;
+
+asm_clobbers:
+    string_literal 
+    {
+      $$ = String($1);
+    }
+  | asm_clobbers ',' string_literal 
+    {
+       $$ = CommaList($1, String($3));
+    }
+;
+
+labellist:
+    IDENTIFIER 
+    { 
+      $$ = IdentName($1);
+    }
+  | labellist ',' IDENTIFIER 
+    {
+       $$ = CommaList($1, IdentName($3));
+    }
+;
+
+/* -------------------------------------------------------------------------
+ * ------------ attributes                             ---------------------
+ * -------------------------------------------------------------------------
+ */
+ 
+attribute_optseq:
+		// empty
+		{
+			$$ = NULL;
+		}
+	|	attribute_seq
+		{
+			$$ = $1;
+		}
+;
+
+attribute_seq:
+		attribute
+		{
+			$$ = $1;
+		}
+	|	attribute_seq attribute
+		{
+			$$ = Speclist_left($1, $2);
+		}
+;
+
+attribute:
+		__ATTRIBUTE__ '(' '(' attribute_name_list ')' ')'
+		{
+			$$ = AttrSpec($4);
+		}
+;
+
+attribute_name_list:
+		attribute_name
+		{
+			$$ = $1;
+		}
+	| attribute_name_list ',' attribute_name
+		{
+			if ($1 == NULL && $3 == NULL)
+				$$ = strdup(",");
+			else
+			  if ($1 == NULL)
+					$$ = strdupcat(strdup(", "), $3, 1);
+				else
+					if ($3 == NULL)
+						$$ = strdupcat($1, strdup(", "), 1);
+					else
+						$$ = strdupcat($1, strdupcat(strdup(", "), $3, 1), 1);
+		}
+;
+
+attribute_name:
+		// empty
+		{
+			$$ = NULL;
+		}
+	|	attr_name
+		{
+			$$ = $1;
+		}
+	|	attr_name '(' argument_expression_list ')'
+		{
+			static str xp = NULL;
+			
+			if (xp == NULL) xp = Strnew();
+			str_printf(xp, "%s(", $1);
+			if ($3)
+				ast_expr_print(xp, $3);
+			str_printf(xp, ")");
+		  $$ = strdup(str_string(xp));
+		  str_truncate(xp);
+		  free($1);
+		}
+;
+
+attr_name:
+		IDENTIFIER { $$ = strdup($1); }
+	|	TYPE_NAME  { $$ = strdup($1); }
+	|	CONSTANT   { $$ = strdup($1); } 
+;
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *                                                               *
+ *     OPENMP RULES                                              *
+ *                                                               *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
 /* -------------------------------------------------------------------------
@@ -2247,10 +2654,6 @@ openmp_construct:
     {
       $$ = $1;
     }
-  | target_update_construct
-    {
-      $$ = $1;
-    }
   | teams_construct
     {
       $$ = $1;
@@ -2351,6 +2754,21 @@ openmp_directive:
     cancellation_point_directive
     {
       $$ = OmpConstruct(DCCANCELLATIONPOINT, $1, NULL);
+    }
+  | /* OpenMP V4.0 2.9.3 page 81 */
+    target_update_directive
+    {
+      $$ = OmpConstruct(DCTARGETUPD, $1, NULL);
+    }
+  | /* OpenMP v4.5, 2.10.2, page 97 */
+    target_enter_data_directive
+    {
+      $$ = OmpConstruct(DCTARGENTERDATA, $1, NULL);
+    }
+  | /* OpenMP v4.5, 2.10.3, page 100 */
+    target_exit_data_directive
+    {
+      $$ = OmpConstruct(DCTARGEXITDATA, $1, NULL);
     }
 ;
 
@@ -2507,16 +2925,31 @@ unique_for_clause:
     {
       $$ = PlainClause(OCORDERED);
     }
-  | OMP_SCHEDULE '(' schedule_kind ')'
+  | OMP_ORDERED '(' expression /* CONSTANT */ ')'     /* OpenMP V4.5 */
     {
-      $$ = ScheduleClause($3, NULL);
+      int n = 0, er = 0;
+      if (xar_expr_is_constant($3))
+      {
+        n = xar_calc_int_expr($3, &er);
+        if (er) n = 0;
+      }
+      if (n <= 0)
+        parse_error(1, "invalid number in ordered() clause.\n");
+      $$ = OrderedNumClause(n);
     }
-  | OMP_SCHEDULE '(' schedule_kind ',' { sc_pause_openmp(); } expression ')'
+  | OMP_SCHEDULE '(' schedule_mod schedule_kind ')'
+    {
+      check_schedule($4, $3);
+      $$ = ScheduleClause($4, $3, NULL);
+    }
+  | OMP_SCHEDULE '(' schedule_mod schedule_kind ',' 
+        { sc_pause_openmp(); } expression ')'
     {
       sc_start_openmp();
-      if ($3 == OC_runtime)
+      if ($4 == OC_runtime)
         parse_error(1, "\"runtime\" schedules may not have a chunksize.\n");
-      $$ = ScheduleClause($3, $6);
+      check_schedule($4, $3);
+      $$ = ScheduleClause($4, $3, $7);
     }
   | OMP_SCHEDULE '(' OMP_AFFINITY ','
     {  /* non-OpenMP schedule */
@@ -2528,7 +2961,7 @@ unique_for_clause:
     {
       sc_start_openmp();
       checkDecls = tempsave;
-      $$ = ScheduleClause(OC_affinity, $6);
+      $$ = ScheduleClause(OC_affinity, OCM_none, $6);
     }
   | collapse_clause
     {
@@ -2558,7 +2991,21 @@ schedule_kind:
       $$ = OC_auto;
     }
   | error { parse_error(1, "invalid openmp schedule type.\n"); }
+;
 
+schedule_mod:
+    // empty
+    {
+      $$ = OCM_none;
+    }
+  | OMP_MONOTONIC ':'
+    {
+      $$ = OCM_monotonic;
+    }
+  | OMP_NONMONOTONIC ':'
+    {
+      $$ = OCM_nonmonotonic;
+    }
 ;
 
 sections_construct:
@@ -3027,8 +3474,16 @@ target_data_clause:
   | map_clause
     {
       $$ = $1;
+      /* OpenMP v4.5, 2.10.1, page 97: must be to/from/tofrom/alloc */
+      if ($$->subtype != OC_tofrom && $$->subtype != OC_to && 
+          $$->subtype != OC_from   && $$->subtype != OC_alloc)
+        parse_error(1, "expected a map type of 'to', 'from', 'tofrom' or 'alloc'\n");
     }
   | if_clause
+    {
+      $$ = $1;
+    }
+  | use_device_ptr_clause    /* OpenMP v4.5, 2.10.1, page 96 */
     {
       $$ = $1;
     }
@@ -3044,19 +3499,36 @@ device_clause:
 ;
 
 /* OpenMP V4.0 2.14.5 page 177 */
+/* OpenMP V4.5 2.15.5.1 page 216 */
 map_clause:
-    OMP_MAP '(' map_type ':' { sc_pause_openmp(); } variable_array_section_list ')'
+    OMP_MAP '(' map_modifier map_type ':' { sc_pause_openmp(); } variable_array_section_list ')'
     {
       sc_start_openmp();
-      $$ = MapClause($3, $6);
+      $$ = MapClause($4, $3, $7);
     }
   | OMP_MAP '(' { sc_pause_openmp(); } variable_array_section_list ')'
     {
       sc_start_openmp();
-	  $$ = MapClause(OC_tofrom, $4);
+      $$ = MapClause(OC_tofrom, OCM_none, $4);
     }
 ;
 
+/* OpenMP V4.5 2.15.5.1 page 216 */
+map_modifier:
+    /* nothing */
+    {
+      $$ = OCM_none;
+    }
+  | OMP_ALWAYS 
+    {
+      $$ = OCM_always;
+    }
+  | OMP_ALWAYS ','
+    {
+      $$ = OCM_always;
+    }
+;
+  
 /* OpenMP V4.0 2.14.5 page 178 */
 map_type:
     OMP_ALLOC
@@ -3074,6 +3546,41 @@ map_type:
   | OMP_TOFROM
     {
       $$ = OC_tofrom;
+    }
+  | OMP_RELEASE   /* OpenMP V4.5 2.15.5.1, p. 216 */
+    {
+      $$ = OC_release; 
+    }
+  | OMP_DELETE    /* OpenMP V4.5 2.15.5.1, p. 216 */
+    {
+      $$ = OC_delete;
+    }
+;
+
+/* OpenMP v4.5, 2.10.1, page 96 */
+use_device_ptr_clause:
+    OMP_USE_DEVICE_PTR '(' { sc_pause_openmp(); } variable_list ')'
+    {
+      sc_start_openmp();
+      $$ = VarlistClause(OCUSEDEVPTR, $4);
+    }
+;
+
+/* OpenMP v4.5, 2.10.4, page 103 */
+defaultmap_clause:
+    OMP_DEFAULTMAP '(' OMP_TOFROM ':' OMP_SCALAR ')'
+    {
+      /* No parameters needed */
+      $$ = PlainClause(OCDEFAULTMAP);
+    }
+;
+
+/* OpenMP v4.5, 2.10.4, page 103 */
+is_device_ptr_clause:
+    OMP_IS_DEVICE_PTR '(' { sc_pause_openmp(); } variable_list ')'
+    {
+      sc_start_openmp();
+      $$ = VarlistClause(OCISDEVPTR, $4);
     }
 ;
 
@@ -3111,12 +3618,28 @@ target_clause_optseq:
     }
 ;
 
-target_clause: //TODO same as target_data_clause???
+target_clause:
     unique_target_clause
     {
       $$ = $1;
     }
   | if_clause
+    {
+      $$ = $1;
+    }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
+    }
+  | data_privatization_clause
+    {
+      $$ = $1;
+    }
+  | data_privatization_in_clause
     {
       $$ = $1;
     }
@@ -3130,14 +3653,122 @@ unique_target_clause:
   | map_clause
     {
       $$ = $1;
+      /* OpenMP v4.5, 2.10.4, page 106: must be to/from/tofrom/alloc */
+      if ($$->subtype != OC_tofrom && $$->subtype != OC_to && 
+          $$->subtype != OC_from   && $$->subtype != OC_alloc)
+        parse_error(1, "expected a map type of 'to', 'from', 'tofrom' or 'alloc'\n");
+    }
+  | defaultmap_clause       /* OpenMP v4.5, 2.10.4, page 103 */
+    {
+      $$ = $1;
+    }
+  | is_device_ptr_clause    /* OpenMP v4.5, 2.10.4, page 103 */
+    {
+      $$ = $1;
     }
 ;
 
-/* OpenMP V4.0 2.9.3 page 81 */
-target_update_construct:
-    target_update_directive
+/* OpenMP v4.5, 2.10.2, page 97 */
+target_enter_data_directive:
+    PRAGMA_OMP OMP_TARGET OMP_ENTER OMP_DATA target_enter_data_clause_seq '\n'
     {
-      $$ = OmpConstruct(DCTARGETUPD, $1, NULL);
+      if (xc_clauselist_get_clause($5, OCMAP, 0) == NULL)
+        parse_error(1, "target enter data directives must contain at least 1 "
+                       "map() clause");
+      $$ = OmpDirective(DCTARGENTERDATA, $5);
+    }
+;
+
+target_enter_data_clause_seq:
+    target_enter_data_clause
+    {
+      $$ = $1;
+    }
+  | target_enter_data_clause_seq target_enter_data_clause
+    {
+      $$ = OmpClauseList($1, $2);
+    }
+  | target_enter_data_clause_seq ',' target_enter_data_clause
+    {
+      $$ = OmpClauseList($1, $3);
+    }
+;
+
+target_enter_data_clause:
+    map_clause
+    {
+      $$ = $1;
+      /* OpenMP v4.5, 2.10.2, page 99: must be to/alloc */
+      if ($$->subtype != OC_to && $$->subtype != OC_alloc)
+        parse_error(1, "expected a map type of 'to' or 'alloc'\n");
+    }
+  | device_clause
+    {
+      $$ = $1;
+    }
+  | if_clause
+    {
+      $$ = $1;
+    }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
+    };
+
+/* OpenMP v4.5, 2.10.3, page 100 */
+target_exit_data_directive:
+    PRAGMA_OMP OMP_TARGET OMP_EXIT OMP_DATA target_exit_data_clause_seq '\n'
+    {
+      if (xc_clauselist_get_clause($5, OCMAP, 0) == NULL)
+        parse_error(1, "target exit data directives must contain at least 1 "
+                       "map() clause");
+      $$ = OmpDirective(DCTARGEXITDATA, $5);
+    }
+;
+
+target_exit_data_clause_seq:
+    target_exit_data_clause
+    {
+      $$ = $1;
+    }
+  | target_exit_data_clause_seq target_exit_data_clause
+    {
+      $$ = OmpClauseList($1, $2);
+    }
+  | target_exit_data_clause_seq ',' target_exit_data_clause
+    {
+      $$ = OmpClauseList($1, $3);
+    }
+;
+
+target_exit_data_clause:
+    map_clause
+    {
+      $$ = $1;
+      /* OpenMP v4.5, 2.10.3, page 102: must be from/release/delete */
+      if ($$->subtype != OC_from && $$->subtype != OC_release &&
+          $$->subtype != OC_delete)
+        parse_error(1, "expected a map type of 'from', 'release' or 'delete'\n");
+    }
+  | device_clause
+    {
+      $$ = $1;
+    }
+  | if_clause
+    {
+      $$ = $1;
+    }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
     }
 ;
 
@@ -3177,26 +3808,40 @@ target_update_clause:
     {
       $$ = $1;
     }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
+    }
 ;
 
 motion_clause:
     OMP_TO { sc_pause_openmp(); } '(' variable_array_section_list ')'
     {
       sc_start_openmp();
-      $$ = VarlistClause(OCTO, $4);
+      $$ = UpdateClause(OCTO, $4);
     }
   | OMP_FROM { sc_pause_openmp(); } '(' variable_array_section_list ')'
     {
       sc_start_openmp();
-      $$ = VarlistClause(OCFROM, $4);
+      $$ = UpdateClause(OCFROM, $4);
     }
 ;
 
-/* OpenMP V4.0 2.9.4 page 83 */
+/* OpenMP V4.0, 2.9.4, page 83 */
+/* OpenMP V4.5, 2.10.6, page 110 (updated) */
 declare_target_construct:
-    declare_target_directive declarations_definitions_seq end_declare_target_directive
+    declare_target_directive declarations_definitions_seq 
+    end_declare_target_directive
     {
       $$ = OmpConstruct(DCDECLTARGET, $1, $2);
+    }
+  | declare_target_directive_v45
+    {
+      $$ = OmpConstruct(DCDECLTARGET, $1, NULL);
     }
 ;
 
@@ -3214,19 +3859,73 @@ end_declare_target_directive:
     }
 ;
 
-/* OpenMP V4.0 2.9.5 page 86 */
-teams_construct:
-    teams_directive structured_block
+/* OpenMP V4.5, 2.10.6, page 110 */
+declare_target_directive_v45:
+    PRAGMA_OMP OMP_DECLARE OMP_TARGET 
+         '(' funcname_variable_array_section_list ')' '\n'
     {
-      //$$ = OmpConstruct(DCTEAMS, $1, $2); TODO DCTEAMS
+      $$ = OmpDirective(DCDECLTARGET, UpdateClause(OCTO, $5));
+    }
+  | PRAGMA_OMP OMP_DECLARE OMP_TARGET declare_target_clause_optseq '\n'
+    {
+      $$ = OmpDirective(DCDECLTARGET, $4);
     }
 ;
 
-/* OpenMP V4.0 2.9.5 page 86 */
+/* OpenMP V4.5, 2.10.6, page 110 */
+declare_target_clause_optseq:
+    unique_declare_target_clause
+    {
+      $$ = $1;
+    }
+  | declare_target_clause_optseq unique_declare_target_clause
+    {
+      $$ = OmpClauseList($1, $2);
+    }
+  | declare_target_clause_optseq ',' unique_declare_target_clause
+    {
+      $$ = OmpClauseList($1, $3);
+    }
+;
+
+/* OpenMP V4.5, 2.10.6, page 110 */
+unique_declare_target_clause:
+    OMP_TO { sc_pause_openmp(); } '(' funcname_variable_array_section_list ')'
+    {
+      sc_start_openmp();
+      $$ = UpdateClause(OCTO, $4);
+    }
+  | OMP_LINK 
+    { 
+      tempsave = checkDecls;   /* No check--the directive can appear anywhere */
+      checkDecls = 0; 
+      sc_pause_openmp(); 
+    } 
+    '(' variable_array_section_list ')'
+    {
+      sc_start_openmp();
+      checkDecls = tempsave;
+      $$ = UpdateClause(OCLINK, $4);
+    }
+;
+
+/* OpenMP V5.0 2.7 page 82
+ * OpenMP V4.0 2.9.5 page 86
+ */
+teams_construct:
+    teams_directive structured_block
+    {
+      $$ = OmpConstruct(DCTEAMS, $1, $2);
+    }
+;
+
+/* OpenMP V5.0 2.7 page 82
+ * OpenMP V4.0 2.9.5 page 86 
+ */
 teams_directive:
     PRAGMA_OMP OMP_TEAMS teams_clause_optseq '\n'
     {
-      //$$ = OmpDirective(DCTEAMS, $3); TODO DCTEAMS
+      $$ = OmpDirective(DCTEAMS, $3);
     }
 ;
 
@@ -3270,6 +3969,7 @@ teams_clause:
     {
       $$ = $1;
     }
+  /* TODO: allocate() clause */
 ;
 
 unique_teams_clause:
@@ -3277,13 +3977,13 @@ unique_teams_clause:
     OMP_NUMTEAMS '(' { sc_pause_openmp(); } expression ')'
     {
       sc_start_openmp();
-      //$$ = NumthreadsClause($4); //TODO check if numthreads is good or if I should make something new
+      $$ = NumteamsClause($4);
     }
   | /* OpenMP V4.0 2.9.5 page 87 */
     OMP_THREADLIMIT '(' { sc_pause_openmp(); } expression ')'
     {
       sc_start_openmp();
-      //$$ = NumthreadsClause($4); //TODO check if numthreads is good or if I should make something new
+      $$ = ThreadlimitClause($4);
     }
 ;
 
@@ -3340,12 +4040,12 @@ distribute_clause:
 unique_distribute_clause:
     OMP_DISTSCHEDULE '(' OMP_STATIC ')'
     {
-      $$ = ScheduleClause(OC_static, NULL);
+      $$ = ScheduleClause(OC_static, OCM_none, NULL);
     }
   | OMP_DISTSCHEDULE '(' OMP_STATIC ',' { sc_pause_openmp(); } expression ')'
     {
       sc_start_openmp();
-      $$ = ScheduleClause(OC_static, $6);
+      $$ = ScheduleClause(OC_static,OCM_none,  $6);
     }
 ;
 
@@ -3486,7 +4186,7 @@ distribute_parallel_for_simd_clause:
 target_teams_construct:
     target_teams_directive structured_block //TODO find out if structured-block or iteration-statement
     {
-      //$$ = OmpConstruct(DCTARGETTEAMS, $1, $2); TODO DCTARGETTEAMS
+      $$ = OmpConstruct(DCTARGETTEAMS, $1, $2);
     }
 ;
 
@@ -3494,7 +4194,7 @@ target_teams_construct:
 target_teams_directive:
     PRAGMA_OMP OMP_TARGET OMP_TEAMS target_teams_clause_optseq '\n'
     {
-      //$$ = OmpDirective(DCTARGETTEAMS, $4); TODO DCTARGETTEAMS
+      $$ = OmpDirective(DCTARGETTEAMS, $4);
     }
 ;
 
@@ -3514,13 +4214,25 @@ target_teams_clause_optseq:
 ;
 
 target_teams_clause:
-    target_clause
+    teams_clause
     {
       $$ = $1;
     }
-  | teams_clause
+  | unique_target_clause
     {
       $$ = $1;
+    }
+  | if_clause
+    {
+      $$ = $1;
+    }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
     }
 ;
 
@@ -3652,14 +4364,27 @@ target_teams_distribute_clause_optseq:
 ;
 
 target_teams_distribute_clause:
-    target_clause
+    teams_distribute_clause
     {
       $$ = $1;
     }
-  | teams_distribute_clause
+  | unique_target_clause
     {
       $$ = $1;
     }
+  | if_clause
+    {
+      $$ = $1;
+    }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
+    }
+
 ;
 
 /* OpenMP V4.0 2.10.9 page 106 */
@@ -3697,13 +4422,25 @@ target_teams_distribute_simd_clause_optseq:
 ;
 
 target_teams_distribute_simd_clause:
-    target_clause
+    teams_distribute_simd_clause
     {
       $$ = $1;
     }
-  | teams_distribute_simd_clause
+  | unique_target_clause
     {
       $$ = $1;
+    }
+  | if_clause
+    {
+      $$ = $1;
+    }
+  | depend_clause
+    {
+      $$ = $1;
+    }
+  | OMP_NOWAIT
+    {
+      $$ = PlainClause(OCNOWAIT);
     }
 ;
 
@@ -3937,6 +4674,10 @@ task_clause:
     {
       $$ = $1;
     }
+  | depend_clause
+    {
+      $$ = $1;
+    }
 ;
 
 /* OpenMP V3.0 */
@@ -3958,10 +4699,19 @@ unique_task_clause:
     {
       $$ = PlainClause(OCMERGEABLE);
     }
-  | /* OpenMP V4.0 2.11.1.1 page 116 */
-    OMP_DEPEND '(' dependence_type ':' variable_array_section_list ')'
+  | /* OpenMP V4.5 2.9.1 page 83 */
+    OMP_PRIORITY '(' expression ')'
     {
-      //$$ = VarlistClause(OCPRIVATE, $6); TODO find out how to do this. It needs type OCDEPEND subtype from $3 and a list from $6
+      $$ = PriorityClause($3);
+    }
+;
+
+depend_clause:
+    /* OpenMP V4.0 2.11.1.1 page 116 */
+    OMP_DEPEND '(' dependence_type { sc_pause_openmp(); } ':' variable_array_section_list ')'
+    {
+      sc_start_openmp();
+      $$ = DependClause($3, $6);
     }
 ;
 
@@ -3969,15 +4719,15 @@ unique_task_clause:
 dependence_type:
     OMP_IN
     {
-      //$$ = OC_in; TODO OC_in
+      $$ = OC_in;
     }
   | OMP_OUT
     {
-      //$$ = OC_out; TODO OC_out
+      $$ = OC_out;
     }
   | OMP_INOUT
     {
-      //$$ = OC_inout; TODO OC_inout
+      $$ = OC_inout;
     }
 ;
 
@@ -4131,11 +4881,16 @@ critical_construct:
 critical_directive:
     PRAGMA_OMP OMP_CRITICAL '\n'
     {
-      $$ = OmpCriticalDirective(NULL);
+      $$ = OmpCriticalDirective(NULL, NULL);
     }
   | PRAGMA_OMP OMP_CRITICAL region_phrase '\n'
     {
-      $$ = OmpCriticalDirective($3);
+      $$ = OmpCriticalDirective($3, NULL);
+    }
+  /* OpenMP V4.5, 2.13.2, p. 149 */
+  | PRAGMA_OMP OMP_CRITICAL region_phrase hint_clause '\n'
+    {
+      $$ = OmpCriticalDirective($3, $4);
     }
 ;
 
@@ -4143,6 +4898,14 @@ region_phrase:
     '(' IDENTIFIER ')'
     {
       $$ = Symbol($2);
+    }
+;
+
+/* OpenMP V4.5, 2.13.2, p. 149 */
+hint_clause:
+    OMP_HINT '(' expression ')'
+    {
+      $$ = HintClause($3);
     }
 ;
 
@@ -4258,16 +5021,116 @@ flush_vars:
 ;
 
 ordered_construct:
-    ordered_directive structured_block
+    ordered_directive_full structured_block
     {
       $$ = OmpConstruct(DCORDERED, $1, $2);
     }
+  | ordered_directive_standalone
+    {
+      $$ = OmpConstruct(DCORDERED, $1, NULL);
+    }
 ;
 
-ordered_directive:
-    PRAGMA_OMP OMP_ORDERED '\n'
+ordered_directive_full:
+    PRAGMA_OMP OMP_ORDERED ordered_clause_optseq_full '\n'
     {
-      $$ = OmpDirective(DCORDERED, NULL);
+      $$ = OmpDirective(DCORDERED, $3);
+    }
+;
+
+ordered_directive_standalone:
+    PRAGMA_OMP OMP_ORDERED OMP_DEPEND '(' OMP_SOURCE ')' '\n'
+    {
+      $$ = OmpDirective(DCORDERED, DependClause(OC_source,NULL));
+    }
+  | PRAGMA_OMP OMP_ORDERED ordered_clause_optseq_standalone '\n'
+    {
+      $$ = OmpDirective(DCORDERED, $3);
+    }
+;
+
+/* OpenMP V4.5 2.13.8, p. 166 */
+ordered_clause_optseq_full:
+    // empty
+    {
+      $$ = NULL;
+    }
+  | ordered_clause_optseq_full ordered_clause_type_full
+    {
+      $$ = OmpClauseList($1, $2);
+    }
+  | ordered_clause_optseq_full ',' ordered_clause_type_full
+    {
+      $$ = OmpClauseList($1, $3);
+    }
+;
+
+/* OpenMP V4.5 2.13.8, p. 166 */
+ordered_clause_type_full:
+    OMP_THREADS
+    {
+      $$ = PlainClause(OCTHREADS);
+    }
+  | OMP_SIMD
+    {
+      //TODO
+    }
+;
+
+/* OpenMP V4.5 2.13.8, p. 166 */
+ordered_clause_optseq_standalone:
+    ordered_clause_depend_sink
+    {
+      $$ = $1;
+    }
+  | ordered_clause_optseq_standalone ordered_clause_depend_sink
+    {
+      $$ = OmpClauseList($1, $2);
+    }
+  | ordered_clause_optseq_standalone ',' ordered_clause_depend_sink
+    {
+      $$ = OmpClauseList($1, $3);
+    }
+;
+
+/* OpenMP V4.5 2.13.8, p. 166 */
+ordered_clause_depend_sink:
+    OMP_DEPEND '(' OMP_SINK ':' sink_vec ')'
+    {
+      $$ = DependClause(OC_sink, NULL);
+      $$->u.expr = $5;
+    }
+; 
+
+sink_vec:
+    sink_vec_elem  
+    {
+      $$ = $1;
+    }
+  | sink_vec_elem ',' sink_vec
+    { 
+      $$ = CommaList($1, $3);
+    }
+;
+
+sink_vec_elem:
+    IDENTIFIER
+    {
+      if (checkDecls)
+        check_uknown_var($1);
+      $$ = BinaryOperator(BOP_add, IdentName($1), numConstant(0));
+    }
+  | IDENTIFIER '+' multiplicative_expression
+    {
+      if (checkDecls)
+        check_uknown_var($1);
+      $$ = BinaryOperator(BOP_add, IdentName($1), $3);
+    }
+  | IDENTIFIER '-' multiplicative_expression
+    {
+      if (checkDecls)
+        check_uknown_var($1);
+      $$ = BinaryOperator(BOP_sub, IdentName($1), $3);
     }
 ;
 
@@ -4332,10 +5195,12 @@ declare_reduction_directive:
 reduction_identifier:
     IDENTIFIER
     {
+      parse_error(1, "user-defined reductions are not implemented yet.\n");
       //$$ = OC_identifier TODO
       //Symbol($2);  TODO
     }
-  | '+'
+  | 
+    '+'
     {
       $$ = OC_plus;
     }
@@ -4457,7 +5322,8 @@ data_sharing_clause:
 ;
 
 data_reduction_clause:
-    OMP_REDUCTION '(' reduction_identifier { sc_pause_openmp(); } ':' variable_list ')'
+    OMP_REDUCTION '(' reduction_identifier { sc_pause_openmp(); } 
+      ':' variable_array_section_list ')'
     {
       sc_start_openmp();
       $$ = ReductionClause($3, $6);
@@ -4468,8 +5334,25 @@ if_clause:
     OMP_IF '(' { sc_pause_openmp(); } expression ')'
     {
       sc_start_openmp();
-      $$ = IfClause($4);
+      $$ = IfClause($4, OCM_none);
     }
+  /* OpenMP V4.5 2.12 page 147 */
+  | OMP_IF '(' if_related_construct ':' { sc_pause_openmp(); } expression ')'
+    {
+      sc_start_openmp();
+      $$ = IfClause($6, $3);
+    }
+;
+
+if_related_construct:
+    OMP_PARALLEL { $$ = OCM_parallel; }
+  | OMP_TASK { $$ = OCM_task; }
+  | OMP_TARGET { $$ = OCM_target; }
+  | OMP_TARGET OMP_DATA { $$ = OCM_targetdata; }
+  | OMP_TARGET OMP_ENTER OMP_DATA { $$ = OCM_targetenterdata; }
+  | OMP_TARGET OMP_EXIT OMP_DATA { $$ = OCM_targetexitdata; }
+  | OMP_TARGET OMP_UPDATE { $$ = OCM_targetupdate; }
+  | OMP_CANCEL { $$ = OCM_cancel; }
 ;
 
 collapse_clause:
@@ -4484,17 +5367,6 @@ collapse_clause:
       if (n <= 0)
         parse_error(1, "invalid number in collapse() clause.\n");
       $$ = CollapseClause(n);
-    }
-;
-
-array_section:
-    IDENTIFIER array_section_subscript
-    {
-      if (checkDecls)
-        if (symtab_get(stab, Symbol($1), IDNAME) == NULL)
-          parse_error(-1, "unknown identifier `%s'.\n", $1);
-      $$ = IdentifierDecl( Symbol($1) );
-      parse_warning("Array section not supported yet. Ignored.\n");
     }
 ;
 
@@ -4516,51 +5388,106 @@ variable_list:
 ;
 
 variable_array_section_list:
-    IDENTIFIER //TODO
+    varid_or_array_section
+    {
+      $$ = $1;
+    }
+  | variable_array_section_list ',' varid_or_array_section
+    {
+      ompxli l = $1;
+      
+      for (; l->next; l = l->next) ;  /* Till the end */
+      l->next = $3;
+      $$ = $1;
+    }
+;
+
+varid_or_array_section:
+    IDENTIFIER
     {
       if (checkDecls)
         if (symtab_get(stab, Symbol($1), IDNAME) == NULL)
           parse_error(-1, "unknown identifier `%s'.\n", $1);
-      $$ = IdentifierDecl( Symbol($1) );
+      $$ = PlainXLI( Symbol($1) );
     }
-  | array_section
+  | IDENTIFIER array_section_slice_list
+    {
+      if (checkDecls)
+        if (symtab_get(stab, Symbol($1), IDNAME) == NULL)
+          parse_error(-1, "unknown identifier `%s'.\n", $1);
+      $$ = ArraySection( Symbol($1), $2 );
+    }
+;
+
+/* OpenMP V4.5 2.1 page 27.
+ * This is what OpenMP calls an "extended list"; we store it in an xli list;
+ * it is only used in the to() clause of the new declare target directives.
+ */  
+funcname_variable_array_section_list:
+    funcvarid_or_array_section
     {
       $$ = $1;
     }
-  | variable_array_section_list ',' IDENTIFIER
+  | funcname_variable_array_section_list ',' funcvarid_or_array_section
     {
-      if (checkDecls)
-        if (symtab_get(stab, Symbol($3), IDNAME) == NULL)
-          parse_error(-1, "unknown identifier `%s'.\n", $3);
-      $$ = IdList($1, IdentifierDecl( Symbol($3) ));
-    }
-  | variable_array_section_list ',' array_section
-    {
-      $$ = IdList($1, $3);
+      ompxli l = $1;
+      
+      for (; l->next; l = l->next) ;  /* Till the end */
+      l->next = $3;
+      $$ = $1;
     }
 ;
 
-array_section_subscript:
-    array_section_subscript '[' { sc_pause_openmp(); } array_section_plain ']'
+funcvarid_or_array_section:
+    IDENTIFIER
     {
-      sc_start_openmp();
-      //TODO
+      /* No check for known identifiers since constuct can be anywhere */
+      $$ = PlainXLI( Symbol($1) );
     }
-  | '[' { sc_pause_openmp(); } array_section_plain ']'
+  | IDENTIFIER array_section_slice_list
     {
-      sc_start_openmp();
-      //TODO
+      /* No check for known identifiers since constuct can be anywhere */
+      $$ = ArraySection( Symbol($1), $2 );
     }
 ;
 
-array_section_plain:
+array_section_slice_list:
+    array_section_slice_list '[' { sc_pause_openmp(); } array_section_slice ']'
+    {
+      omparrdim d = $1;
+      
+      sc_start_openmp();
+      for (; d->next; d = d->next) ;  /* Till the end */
+      d->next = $4;
+      $$ = $1;
+    }
+  | '[' { sc_pause_openmp(); } array_section_slice ']'
+    {
+      sc_start_openmp();
+      $$ = $3;
+    }
+;
+
+array_section_slice:
     expression ':' expression
     {
-      //TODO
+      $$ = OmpArrDim($1, $3);
+    }
+  | expression ':'
+    {
+      $$ = OmpArrDim($1, NULL);
     }
   | expression
     {
-      //TODO
+      $$ = OmpArrDim($1, numConstant(1));
+    }
+  | ':' expression
+    {
+      $$ = OmpArrDim(numConstant(0), $2);
+    }
+  | ':' 
+    {
+      $$ = OmpArrDim(numConstant(0), NULL);
     }
  ;
 
@@ -4569,6 +5496,10 @@ procbind_clause:
     OMP_PROCBIND '(' OMP_MASTER ')'
     {
       $$ = ProcBindClause(OC_bindmaster);
+    }
+  | OMP_PROCBIND '(' OMP_PRIMARY ')'
+    {
+      $$ = ProcBindClause(OC_bindprimary);
     }
   | OMP_PROCBIND '(' OMP_CLOSE ')'
     {
@@ -4623,6 +5554,13 @@ thrprv_variable_list:
       $$ = IdList($1, IdentifierDecl( Symbol($3) ));
     }
 ;
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *                                                               *
+ *     OMPi extensions                                           *
+ *                                                               *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /* -------------------------------------------------------------------------
  * --- OMPi extensions -----------------------------------------------------
@@ -4730,7 +5668,7 @@ ompix_construct:
 
 /* 1 reduce-reduce here; it's benign but we'll improve it some day.. */
 ox_taskdef_construct:
-   ox_taskdef_directive normal_function_definition
+    ox_taskdef_directive normal_function_definition
     {
       /* Should put the name of the callback function in the stab, too
       if (symtab_get(stab, decl_getidentifier_symbol($2->u.declaration.decl),
@@ -4782,19 +5720,19 @@ ox_taskdef_clause_optseq:
 ;
 
 ox_taskdef_clause:
-    OMPIX_IN '(' ox_variable_size_list')'
+    OMP_IN '(' ox_variable_size_list')'
     {
       $$ = OmpixVarlistClause(OX_OCIN, $3);
     }
-  | OMPIX_OUT '(' ox_variable_size_list')'
+  | OMP_OUT '(' ox_variable_size_list')'
     {
       $$ = OmpixVarlistClause(OX_OCOUT, $3);
     }
-  | OMPIX_INOUT '(' ox_variable_size_list')'
+  | OMP_INOUT '(' ox_variable_size_list')'
     {
       $$ = OmpixVarlistClause(OX_OCINOUT, $3);
     }
-    | OMP_REDUCTION '(' reduction_identifier ':' ox_variable_size_list ')'
+  | OMP_REDUCTION '(' reduction_identifier ':' ox_variable_size_list ')'
     {
       $$ = OmpixReductionClause($3, $5);
     }
@@ -4833,9 +5771,10 @@ ox_variable_size_elem:
 ;
 
 ox_task_construct:
-    ox_task_directive ox_funccall_expression ';'
+    ox_task_directive IDENTIFIER '(' argument_expression_list ')' ';'
     {
-      $$ = OmpixConstruct(OX_DCTASK, $1, Expression($2));
+      $$ = OmpixConstruct(OX_DCTASK, $1, 
+             FuncCallStmt(IdentName(strcmp($2,"main") ? $2 : MAIN_NEWNAME),$4));
       $$->l = $1->l;
     }
 ;
@@ -4871,6 +5810,14 @@ ox_task_clause:
     {
       $$ = OmpixAtnodeClause($3);
     }
+  | OMPIX_ATNODE '(' OMPIX_HERE ')'
+    {
+      $$ = OmpixPlainClause(OX_OCLOCAL);
+    }
+  | OMPIX_ATNODE '(' OMPIX_REMOTE ')'
+    {
+      $$ = OmpixPlainClause(OX_OCREMOTE);
+    }
   | OMPIX_ATWORKER '(' assignment_expression ')'
     {
       $$ = OmpixAtworkerClause($3);
@@ -4887,20 +5834,13 @@ ox_task_clause:
     {
       $$ = OmpixPlainClause(OX_OCDETACHED);
     }
-;
-
-ox_funccall_expression:
-    IDENTIFIER '(' ')'
+  | OMP_HINT '(' expression ')'
     {
-      $$ = strcmp($1, "main") ?
-             FunctionCall(IdentName($1), NULL) :
-             FunctionCall(IdentName(MAIN_NEWNAME), NULL);
+      $$ = OmpixHintsClause($3);
     }
-  | IDENTIFIER '(' argument_expression_list ')'
+  | IF '(' expression ')'
     {
-      $$ = strcmp($1, "main") ?
-             FunctionCall(IdentName($1), $3) :
-             FunctionCall(IdentName(MAIN_NEWNAME), $3);
+      $$ = OmpixIfClause($3);
     }
 ;
 
@@ -4917,8 +5857,32 @@ ox_funccall_expression:
 
 void yyerror(const char *s)
 {
-  fprintf(stderr, "(file %s, line %d, column %d):\n\t%s\n",
-                  sc_original_file(), sc_original_line(), sc_column(), s);
+	fprintf(stderr, "(file %s, line %d, column %d):\n\t%s\n",
+	                sc_original_file(), sc_original_line(), sc_column(), s);
+}
+
+
+/* Utility function 
+ */
+char *strdupcat(char *first, char *second, int freethem)
+{
+	char *res;
+	
+	if (first == NULL && second == NULL)
+		return NULL;
+	if (first == NULL) 
+		return (freethem) ? second : strdup(second);
+	if (second == NULL) 
+		return (freethem) ? first : strdup(first);
+	if ((res = malloc(strlen(first)+strlen(second)+1)) == NULL)
+		parse_error(1, "strdupcat ran out of memory\n");
+	sprintf(res, "%s%s", first, second);
+	if (freethem)
+	{
+		free(first);
+		free(second);
+	}
+	return res;
 }
 
 
@@ -4926,11 +5890,11 @@ void yyerror(const char *s)
  */
 void check_uknown_var(char *name)
 {
-  symbol s = Symbol(name);
-  if (symtab_get(stab, s, IDNAME) == NULL &&
-      symtab_get(stab, s, LABELNAME) == NULL &&
-      symtab_get(stab, s, FUNCNAME) == NULL)
-    parse_error(-1, "unknown identifier `%s'.\n", name);
+	symbol s = Symbol(name);
+	if (symtab_get(stab, s, IDNAME) == NULL &&
+			symtab_get(stab, s, LABELNAME) == NULL &&
+			symtab_get(stab, s, FUNCNAME) == NULL)
+		parse_error(-1, "unknown identifier `%s'.\n", name);
 }
 
 
@@ -4942,74 +5906,74 @@ void check_uknown_var(char *name)
  */
 astdecl fix_known_typename(astspec s)
 {
-  astspec prev;
-  astdecl d;
+	astspec prev;
+	astdecl d;
 
-  if (s->type != SPECLIST || s->u.next->type != SPECLIST) return (NULL);
+	if (s->type != SPECLIST || s->u.next->type != SPECLIST) return (NULL);
 
-  for (; s->u.next->type == SPECLIST; prev = s, s = s->u.next)
-    ;   /* goto last list node */
-  if (s->u.next->type != USERTYPE)         /* nope */
-    return (NULL);
+	for (; s->u.next->type == SPECLIST; prev = s, s = s->u.next)
+		;   /* goto last list node */
+	if (s->u.next->type != USERTYPE)         /* nope */
+		return (NULL);
 
-  prev->u.next = s->body;
+	prev->u.next = s->body;
 
-  d = Declarator(NULL, IdentifierDecl(s->u.next->name));
-  if (checkDecls)
-    symtab_put(stab, s->u.next->name, TYPENAME);
-  free(s);
-  return (d);
+	d = Declarator(NULL, IdentifierDecl(s->u.next->name));
+	if (checkDecls)
+		symtab_put(stab, s->u.next->name, TYPENAME);
+	free(s);
+	return (d);
 }
 
 
 void check_for_main_and_declare(astspec s, astdecl d)
 {
-  astdecl n = decl_getidentifier(d);
+	astdecl n = decl_getidentifier(d);
 
-  assert(d->type == DECLARATOR);
-  assert(d->decl->type == DFUNC);
+	assert(d->type == DECLARATOR);
+	assert(d->decl->type == DFUNC);
 
-  if (strcmp(n->u.id->name, "main") == 0)
-  {
-    n->u.id = Symbol(MAIN_NEWNAME);         /* Catch main()'s definition */
-    hasMainfunc = 1;
+	if (strcmp(n->u.id->name, "main") == 0)
+	{
+		n->u.id = Symbol(MAIN_NEWNAME);         /* Catch main()'s definition */
+		hasMainfunc = 1;
 
-    /* Now check for return type and # parameters */
-    /* It d != NULL then its parameters is either (id or idlist) or
-     * (paramtype or parmatypelist). If it is a list, assume the
-     * standard 2 params, otherwise, we guess the single argument
-     * must be the type "void" which means no params.
-     * In any case, we always force main have (argc, argv[]).
-     */
-    if (d->decl->u.params == NULL || d->decl->u.params->type != DLIST)
-      d->decl->u.params =
-          ParamList(
-            ParamDecl(
-              Declspec(SPEC_int),
-              Declarator( NULL, IdentifierDecl( Symbol("_argc_ignored") ) )
-            ),
-            ParamDecl(
-              Declspec(SPEC_char),
-              Declarator(Speclist_right( Pointer(), Pointer() ),
-                         IdentifierDecl( Symbol("_argv_ignored") ))
-            )
-          );
+		/* Now check for return type and # parameters */
+		/* It d != NULL then its parameters is either (id or idlist) or
+		* (paramtype or parmatypelist). If it is a list, assume the
+		* standard 2 params, otherwise, we guess the single argument
+		* must be the type "void" which means no params.
+		* In any case, we always force main have (argc, argv[]).
+		*/
+		if (d->decl->u.params == NULL || d->decl->u.params->type != DLIST)
+			d->decl->u.params =
+					ParamList(
+						ParamDecl(
+							Declspec(SPEC_int),
+							Declarator( NULL, IdentifierDecl( Symbol("_argc_ignored") ) )
+						),
+						ParamDecl(
+							Declspec(SPEC_char),
+							Declarator(Speclist_right( Pointer(), Pointer() ),
+												IdentifierDecl( Symbol("_argv_ignored") ))
+						)
+					);
 
-    mainfuncRettype = 0; /* int */
-    if (s != NULL)
-    {
-      for (; s->type == SPECLIST && s->subtype == SPEC_Rlist; s = s->u.next)
-        if (s->body->type == SPEC && s->body->subtype == SPEC_void)
-        {
-          s = s->body;
-          break;
-        };
-      if (s->type == SPEC && s->subtype == SPEC_void)
-        mainfuncRettype = 1; /* void */
-    }
-  }
-  if (symtab_get(stab, n->u.id, FUNCNAME) == NULL)/* From earlier declaration */
-    symtab_put(stab, n->u.id, FUNCNAME);
+		mainfuncRettype = 0; /* int */
+		if (s != NULL)
+		{
+			for (; s->type == SPECLIST && s->subtype == SPEC_Rlist; s = s->u.next)
+				if (s->body->type == SPEC && s->body->subtype == SPEC_void)
+				{
+					s = s->body;
+					break;
+				};
+			if (s->type == SPEC && s->subtype == SPEC_void)
+				mainfuncRettype = 1; /* void */
+		}
+	}
+	if (symtab_get(stab, n->u.id, FUNCNAME) == NULL)/* From earlier declaration */
+		symtab_put(stab, n->u.id, FUNCNAME);
 }
 
 
@@ -5018,147 +5982,156 @@ void check_for_main_and_declare(astspec s, astdecl d)
  */
 void add_declaration_links(astspec s, astdecl d)
 {
-  astdecl ini = NULL;
+	astdecl ini = NULL;
 
-  if (d->type == DLIST && d->subtype == DECL_decllist)
-  {
-    add_declaration_links(s, d->u.next);
-    d = d->decl;
-  }
-  if (d->type == DINIT) d = (ini = d)->decl;   /* Skip the initializer */
-  assert(d->type == DECLARATOR);
-  if (d->decl != NULL && d->decl->type != ABSDECLARATOR)
-  {
-    symbol  t = decl_getidentifier_symbol(d->decl);
-    stentry e = isTypedef ?
-                symtab_get(stab,t,TYPENAME) :
-                symtab_get(stab,t,(decl_getkind(d)==DFUNC) ? FUNCNAME : IDNAME);
-    e->spec  = s;
-    e->decl  = d;
-    e->idecl = ini;
-  }
+	if (d->type == DLIST && d->subtype == DECL_decllist)
+	{
+		add_declaration_links(s, d->u.next);
+		d = d->decl;
+	}
+	if (d->type == DINIT) d = (ini = d)->decl;   /* Skip the initializer */
+	assert(d->type == DECLARATOR);
+	if (d->decl != NULL && d->decl->type != ABSDECLARATOR)
+	{
+		symbol  t = decl_getidentifier_symbol(d->decl);
+		stentry e = isTypedef ?
+		            symtab_get(stab,t,TYPENAME) :
+		            symtab_get(stab,t,(decl_getkind(d)==DFUNC) ? FUNCNAME : IDNAME);
+		e->spec  = s;
+		e->decl  = d;
+		e->idecl = ini;
+	}
+}
+
+
+void  check_schedule(ompclsubt_e sched, ompclmod_e mod)
+{
+	if (mod == OCM_none) return;
+	if (mod == OCM_nonmonotonic && sched != OC_dynamic && sched != OC_guided)
+		parse_error(1, "nonmonotonic modifier is only allowed in dynamic or "
+		                 "guided schedules\n");
 }
 
 
 void parse_error(int exitvalue, char *format, ...)
 {
-  va_list ap;
+	va_list ap;
 
-  va_start(ap, format);
-  fprintf(stderr, "(%s, line %d)\n\t", sc_original_file(), sc_original_line());
-  vfprintf(stderr, format, ap);
-  va_end(ap);
-  if (strcmp(sc_original_file(), "injected_code") == 0)
-    fprintf(stderr, "\n>>>>>>>\n%s\n>>>>>>>\n", parsingstring);
-  _exit(exitvalue);
+	va_start(ap, format);
+	fprintf(stderr, "(%s, line %d)\n\t", sc_original_file(), sc_original_line());
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	if (strcmp(sc_original_file(), "injected_code") == 0)
+		fprintf(stderr, "\n>>>>>>>\n%s\n>>>>>>>\n", parsingstring);
+	_exit(exitvalue);
 }
 
 
 void parse_warning(char *format, ...)
 {
-  va_list ap;
+	va_list ap;
 
-  va_start(ap, format);
-  fprintf(stderr, "[warning] ");
-  vfprintf(stderr, format, ap);
-  va_end(ap);
+	va_start(ap, format);
+	fprintf(stderr, "[warning] ");
+	vfprintf(stderr, format, ap);
+	va_end(ap);
 }
 
 
 aststmt parse_file(char *fname, int *error)
 {
-  *error = 0;
-  if ( (yyin = fopen(fname, "r")) == NULL )
-    return (NULL);
-  sc_set_filename(fname);      /* Inform the scanner */
-  *error = yyparse();
-  fclose(yyin);                /* No longer needed */
-  return (pastree);
+	*error = 0;
+	if ( (yyin = fopen(fname, "r")) == NULL )
+		return (NULL);
+	sc_set_filename(fname);      /* Inform the scanner */
+	*error = yyparse();
+	fclose(yyin);                /* No longer needed */
+	return (pastree);
 }
 
 
-#define PARSE_STRING_SIZE 8192
+#define PARSE_STRING_SIZE 16384
 
 
 astexpr parse_expression_string(char *format, ...)
 {
-  static char s[PARSE_STRING_SIZE];
-  int    savecD;
+	static char s[PARSE_STRING_SIZE];
+	int    savecD;
 
-  va_list ap;
-  va_start(ap, format);
-  vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
-  va_end(ap);
-  parsingstring = s;
-  sc_scan_string(s);
-  sc_set_start_token(START_SYMBOL_EXPRESSION);
+	va_list ap;
+	va_start(ap, format);
+	vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
+	va_end(ap);
+	parsingstring = s;
+	sc_scan_string(s);
+	sc_set_start_token(START_SYMBOL_EXPRESSION);
 
-  savecD = checkDecls;
-  checkDecls = 0;         /* Don't check identifiers & don't declare them */
-  yyparse();
-  checkDecls = savecD;    /* Reset it */
-  return ( pastree_expr );
+	savecD = checkDecls;
+	checkDecls = 0;         /* Don't check identifiers & don't declare them */
+	yyparse();
+	checkDecls = savecD;    /* Reset it */
+	return ( pastree_expr );
 }
 
 
 aststmt parse_blocklist_string(char *format, ...)
 {
-  static char s[PARSE_STRING_SIZE];
-  int    savecD;
+	static char s[PARSE_STRING_SIZE];
+	int    savecD;
 
-  va_list ap;
-  va_start(ap, format);
-  vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
-  va_end(ap);
-  parsingstring = s;
-  sc_scan_string(s);
-  sc_set_start_token(START_SYMBOL_BLOCKLIST);
+	va_list ap;
+	va_start(ap, format);
+	vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
+	va_end(ap);
+	parsingstring = s;
+	sc_scan_string(s);
+	sc_set_start_token(START_SYMBOL_BLOCKLIST);
 
-  savecD = checkDecls;
-  checkDecls = 0;         /* Don't check identifiers & don't declare them */
-  yyparse();
-  checkDecls = savecD;    /* Reset it */
-  return ( pastree_stmt );
+	savecD = checkDecls;
+	checkDecls = 0;         /* Don't check identifiers & don't declare them */
+	yyparse();
+	checkDecls = savecD;    /* Reset it */
+	return ( pastree_stmt );
 }
 
 
 aststmt parse_and_declare_blocklist_string(char *format, ...)
 {
-  static char s[PARSE_STRING_SIZE];
-  int    savecD;
+	static char s[PARSE_STRING_SIZE];
+	int    savecD;
 
-  va_list ap;
-  va_start(ap, format);
-  vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
-  va_end(ap);
-  parsingstring = s;
-  sc_scan_string(s);
-  sc_set_start_token(START_SYMBOL_BLOCKLIST);
+	va_list ap;
+	va_start(ap, format);
+	vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
+	va_end(ap);
+	parsingstring = s;
+	sc_scan_string(s);
+	sc_set_start_token(START_SYMBOL_BLOCKLIST);
 
-  savecD = checkDecls;
-  checkDecls = 1;         /* Do check identifiers & do declare them */
-  yyparse();
-  checkDecls = savecD;    /* Reset it */
-  return ( pastree_stmt );
+	savecD = checkDecls;
+	checkDecls = 1;         /* Do check identifiers & do declare them */
+	yyparse();
+	checkDecls = savecD;    /* Reset it */
+	return ( pastree_stmt );
 }
 
 
 aststmt parse_transunit_string(char *format, ...)
 {
-  static char s[PARSE_STRING_SIZE];
-  int    savecD;
+	static char s[PARSE_STRING_SIZE];
+	int    savecD;
 
-  va_list ap;
-  va_start(ap, format);
-  vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
-  va_end(ap);
-  parsingstring = s;
-  sc_scan_string(s);
-  sc_set_start_token(START_SYMBOL_TRANSUNIT);
+	va_list ap;
+	va_start(ap, format);
+	vsnprintf(s, PARSE_STRING_SIZE-1, format, ap);
+	va_end(ap);
+	parsingstring = s;
+	sc_scan_string(s);
+	sc_set_start_token(START_SYMBOL_TRANSUNIT);
 
-  savecD = checkDecls;
-  checkDecls = 0;         /* Don't check identifiers & don't declare them */
-  yyparse();
-  checkDecls = savecD;    /* Reset it */
-  return ( pastree_stmt );
+	savecD = checkDecls;
+	checkDecls = 0;         /* Don't check identifiers & don't declare them */
+	yyparse();
+	checkDecls = savecD;    /* Reset it */
+	return ( pastree_stmt );
 }

@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* This is the pthreads threading library for OMPi
@@ -36,9 +36,6 @@
 #include <unistd.h>
 #include <pthread.h>
 #include "../sysdeps.h"
-
-#define _OMP_ACTIVE   0        /* Wait policies */
-#define _OMP_PASSIVE  1
 
 /* The threading library should provide the following types:
  *    othr_key_t
@@ -84,14 +81,15 @@ typedef union
  */
 
 /* Base functions */
-extern int  othr_initialize(int *argc, char ***argv,
-                            ort_icvs_t *icv, ort_caps_t *cap);
-extern void othr_finalize(int exitvalue);
-extern int  othr_request(int numthreads, int level);
-extern void othr_create(int numthreads, int level, void *arg, void **info);
-extern void othr_waitall(void **info);
-/* sched_yield consumes given quantum, we instead use usleep */
-//#define othr_yield() usleep(1)
+extern int   othr_initialize(int *argc, char ***argv,
+                             ort_icvs_t *icv, ort_caps_t *cap);
+extern void  othr_finalize(int exitvalue);
+extern int   othr_request(int numthreads, int level, int oversubscribe);
+extern void  othr_create(int numthreads, int level, void *arg, void **info);
+extern void  othr_waitall(void **info);
+extern int   othr_bindme(int **places, int pindex);
+extern int   othr_getselfid(void);
+extern void *othr_getself(unsigned int *size);
 #define othr_yield sched_yield
 
 /* Thread-specifics */

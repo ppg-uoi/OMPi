@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_print.c -- a non-reentrant way to print the AST onto a string buffer */
@@ -184,8 +184,33 @@ static void ast_stmt_labeled_prn(aststmt tree)
 }
 
 
+static void ast_asmop_prn(asmop op)
+{
+	if (!op->constraint)   /* a list */
+	{
+		ast_asmop_prn(op->op);
+		str_printf(bf, ", ");
+		ast_asmop_prn(op->next);
+	}
+	else
+	{
+		if (op->symbolicname)
+		{
+			str_printf(bf, "[");
+			ast_expr_prn(op->symbolicname);
+			str_printf(bf, "]");
+		}
+		str_printf(bf, " %s(", op->constraint);
+		ast_expr_prn(op->var);
+		str_printf(bf, ")");
+	}
+}
+
+
 static void ast_stmt_prn(aststmt tree)
 {
+	if (!tree)
+		return;
 	switch (tree->type)
 	{
 		case JUMP:
@@ -248,6 +273,50 @@ static void ast_stmt_prn(aststmt tree)
 			indent();
 			ast_stmt_prn(tree->body);
 			str_printf(bf, "\n");
+			break;
+		case ASMSTMT:
+			str_printf(bf, "__asm__ ");
+			if (tree->u.assem->qualifiers)
+			{
+				ast_spec_prn(tree->u.assem->qualifiers);
+				str_printf(bf, " ");
+			}
+			if (tree->subtype == SGOTO)
+				str_printf(bf, "goto ");
+			str_printf(bf, "(%s", tree->u.assem->template);
+			if (tree->subtype == SXTENDED)
+			{
+				if (tree->u.assem->outs || tree->u.assem->ins || tree->u.assem->clobbers)
+				{
+					str_printf(bf, " : "); 
+					if (tree->u.assem->outs)
+						ast_asmop_prn(tree->u.assem->outs);
+				}
+				if (tree->u.assem->ins || tree->u.assem->clobbers)
+				{
+					str_printf(bf, " : ");
+					if (tree->u.assem->ins)
+						ast_asmop_prn(tree->u.assem->ins);
+				}
+				if (tree->u.assem->clobbers)
+				{
+					str_printf(bf, " : ");
+					ast_expr_prn(tree->u.assem->clobbers);
+				}
+			}
+			if (tree->subtype == SGOTO)
+			{
+				str_printf(bf, " : : "); 
+				if (tree->u.assem->ins)
+					ast_asmop_prn(tree->u.assem->ins);
+				str_printf(bf, " : ");
+				if (tree->u.assem->clobbers)
+					ast_expr_prn(tree->u.assem->clobbers);
+				str_printf(bf, " : ");
+				if (tree->u.assem->labels)
+					ast_expr_prn(tree->u.assem->labels);
+			}
+			str_printf(bf, ")\n");
 			break;
 		case OMPSTMT:
 			ast_ompcon_prn(tree->u.omp);
@@ -390,7 +459,12 @@ static void ast_spec_prn(astspec tree)
 				case SPEC_enum:
 					str_printf(bf, "enum");
 					if (tree->name)
-						str_printf(bf, " %s ", tree->name->name);
+						str_printf(bf, " %s", tree->name->name);
+					if (tree->sueattr)
+					{
+						str_printf(bf, " ");
+						ast_spec_prn(tree->sueattr);
+					}
 					if (tree->body)
 					{
 						str_printf(bf, " {\n");
@@ -404,8 +478,13 @@ static void ast_spec_prn(astspec tree)
 				case SPEC_struct:
 				case SPEC_union:
 					str_printf(bf, "%s", tree->subtype == SPEC_struct ? "struct" : "union");
+					if (tree->sueattr)
+					{
+						str_printf(bf, " ");
+						ast_spec_prn(tree->sueattr);
+					}
 					if (tree->name)
-						str_printf(bf, " %s ", tree->name->name);
+						str_printf(bf, " %s", tree->name->name);
 					if (tree->u.decl)
 					{
 						str_printf(bf, " {\n");
@@ -451,10 +530,12 @@ static void ast_spec_prn(astspec tree)
 					fprintf(stderr, "[ast_spec_prn]: list b u g !!\n");
 			}
 			break;
+		case ATTRSPEC:
+			str_printf(bf, "__attribute__(( %s ))", tree->u.txt ? tree->u.txt : "");
+			break;
 		default:
 			fprintf(stderr, "[ast_spec_prn]: b u g !!\n");
 	}
-	fflush(stdout);
 }
 
 
@@ -573,7 +654,6 @@ static void ast_decl_prn(astdecl tree)
 		default:
 			fprintf(stderr, "[ast_decl_prn]: b u g !!\n");
 	}
-	fflush(stdout);
 }
 
 
@@ -582,6 +662,33 @@ static void ast_decl_prn(astdecl tree)
  *     OpenMP NODES                                              *
  *                                                               *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+static void ast_omparrdim_prn(omparrdim d)
+{
+	str_printf(bf, "[");
+	ast_expr_prn(d->lb);
+	str_printf(bf, " : ");
+	if (d->len)
+		ast_expr_prn(d->len);
+	str_printf(bf, "]");
+}
+
+
+static void ast_ompxli_prn(ompxli xl)
+{
+	omparrdim s;
+	
+	for (; xl; xl = xl->next)
+	{
+		str_printf(bf, "%s", xl->id->name);
+		if (xl->xlitype == OXLI_ARRSEC)
+			for (s = xl->dim; s; s = s->next)
+				ast_omparrdim_prn(s);
+		if (xl->next)
+			str_printf(bf, ", ");
+	}
+}
 
 
 static void ast_ompclause_prn(ompclause t)
@@ -600,13 +707,26 @@ static void ast_ompclause_prn(ompclause t)
 	switch (t->type)
 	{
 		case OCIF:
+			if (t->modifier != OCM_none)
+				str_printf(bf, "(%s: ", clausemods[t->modifier]);
+			else
+				str_printf(bf, "("); 
+			ast_expr_prn(t->u.expr); str_printf(bf, ")");
+			break;
 		case OCFINAL:
 		case OCNUMTHREADS:
 		case OCDEVICE:
+		case OCNUMTEAMS:
+		case OCTHREADLIMIT:
+		case OCHINT:
+		case OCPRIORITY:
 			str_printf(bf, "("); ast_expr_prn(t->u.expr); str_printf(bf, ")");
 			break;
 		case OCSCHEDULE:
-			str_printf(bf, "(%s%s", clausesubs[t->subtype], t->u.expr ? ", " : " ");
+			str_printf(bf, "(");
+			if (t->modifier != OCM_none)
+				str_printf(bf, "%s:", clausemods[t->modifier]);
+			str_printf(bf, "%s%s", clausesubs[t->subtype], t->u.expr ? ", " : " ");
 			if (t->u.expr)
 				ast_expr_prn(t->u.expr);
 			str_printf(bf, ")");
@@ -615,10 +735,35 @@ static void ast_ompclause_prn(ompclause t)
 		case OCPROCBIND:
 			str_printf(bf, "(%s)", clausesubs[t->subtype]);
 			break;
-		case OCMAP:
+		case OCDEPEND:
+			if (t->subtype == OC_sink)
+			{
+				str_printf(bf, "(%s: ", clausesubs[t->subtype]);
+				if (t->u.expr)
+					ast_expr_prn(t->u.expr);
+				str_printf(bf, ")");
+				break;
+			}
+			if (t->subtype == OC_source)
+			{
+				str_printf(bf, "(%s)", clausesubs[t->subtype]);
+				break;
+			}
+
 		case OCREDUCTION:
-			str_printf(bf, "(%s: ", clausesubs[t->subtype]);
-			ast_decl_prn(t->u.varlist);
+		case OCMAP:
+			if (t->modifier != OCM_none)
+				str_printf(bf,"(%s,%s: ",clausemods[t->modifier],clausesubs[t->subtype]);
+			else
+				str_printf(bf, "(%s: ", clausesubs[t->subtype]);
+			ast_ompxli_prn(t->u.xlist);
+			str_printf(bf, ")");
+			break;
+		case OCTO:
+		case OCFROM:
+		case OCLINK:
+			str_printf(bf, "(");
+			ast_ompxli_prn(t->u.xlist);
 			str_printf(bf, ")");
 			break;
 		case OCCOPYIN:
@@ -627,8 +772,8 @@ static void ast_ompclause_prn(ompclause t)
 		case OCFIRSTPRIVATE:
 		case OCLASTPRIVATE:
 		case OCSHARED:
-		case OCTO:
-		case OCFROM:
+		case OCISDEVPTR:
+		case OCUSEDEVPTR:
 		case OCAUTO:
 			str_printf(bf, "("); ast_decl_prn(t->u.varlist); str_printf(bf, ")");
 			break;
@@ -640,10 +785,14 @@ static void ast_ompclause_prn(ompclause t)
 		case OCSECTIONS:
 		case OCFOR:
 		case OCTASKGROUP:
+		case OCDEFAULTMAP:
 			break;
 		case OCCOLLAPSE:
+		case OCORDEREDNUM:
 			str_printf(bf, "(%d)", t->subtype);
 			break;
+		default:
+			fprintf(stderr, "[ast_ompclause_prn]: b u g !! (%d)\n", t->type);
 	}
 }
 
@@ -655,7 +804,11 @@ static void ast_ompdir_prn(ompdir t)
 	{
 		case DCCRITICAL:
 			if (t->u.region)
+			{
 				str_printf(bf, "(%s)", t->u.region->name);
+				if (t->clauses)
+					ast_ompclause_prn(t->clauses);
+			}
 			break;
 		case DCFLUSH:
 			if (t->u.varlist)
@@ -678,16 +831,17 @@ static void ast_ompdir_prn(ompdir t)
 				ast_ompclause_prn(t->clauses);
 			break;
 	}
+	str_printf(bf, "\n");
 }
 
 
 static void ast_ompcon_prn(ompcon t)
 {
 	ast_ompdir_prn(t->directive);
-	if (t->body)     /* barrier & flush don't have a body */
+	if (t->body)     /* stand-alones don't have a body */
 		ast_stmt_prn(t->body);
-	if (t->directive->type == DCDECLTARGET)
-		str_printf(bf, "#pragma omp end %s ", ompdirnames[t->type]);
+	if (t->type == DCDECLTARGET && t->body)  /* v4.0 style */
+		str_printf(bf, "#pragma omp end %s\n", ompdirnames[t->type]);
 }
 
 
@@ -773,9 +927,13 @@ void ast_oxclause_prn(oxclause t)
 			break;
 		case OX_OCATNODE:
 		case OX_OCATWORKER:
+		case OX_OCIF:
 		case OX_OCSTART:
 		case OX_OCSTRIDE:
 			str_printf(bf, "("); ast_expr_prn(t->u.expr); str_printf(bf, ")");
+			break;
+		case OX_OCLOCAL:
+		case OX_OCREMOTE:
 			break;
 		case OX_OCSCOPE:
 			str_printf(bf, "scope(%s)", t->u.value == OX_SCOPE_NODES ? "nodes" :

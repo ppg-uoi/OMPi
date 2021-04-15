@@ -4,6 +4,7 @@
 .cmcsc-10x-x-172{font-size:172%;}
 .cmti-10{ font-style: italic;}
 .cmtt-10{font-family: monospace;}
+.cmbx-10{ font-weight: bold;}
 .small-caps{font-variant: small-caps; }
 p.noindent { text-indent: 0em }
 td p.noindent { text-indent: 0em; margin-top:0em; }
@@ -130,6 +131,12 @@ div.thanks{text-align:left; margin-left:10%; font-size:85%; font-style:italic; }
 .quotation {margin-bottom:0.25em; margin-top:0.25em; margin-left:1em; }
 .abstract p {margin-left:5%; margin-right:5%;}
 div.abstract {width:100%;}
+#TBL-2 colgroup{border-left: 1px solid black;border-right:1px solid black;}
+#TBL-2{border-collapse:collapse;}
+#TBL-2 colgroup{border-left: 1px solid black;border-right:1px solid black;}
+#TBL-2{border-collapse:collapse;}
+#TBL-2 colgroup{border-left: 1px solid black;border-right:1px solid black;}
+#TBL-2{border-collapse:collapse;}
  #TBL-2-1-{ background-color:rgb(204,204,204)}
 /* end css.sty */
 

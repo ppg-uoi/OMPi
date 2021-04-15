@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #ifndef __SYSDEPS_H__
@@ -61,8 +61,7 @@
 
 /*
  * CACHE_LINE size (for L2 cache).
- * A generally good value here is 128 bytes, so it is the default, to be
- * on the safe side.
+ * On Feb 12, 2021 we decided to set the default value to 64.
  * However, different processors have different sizes, so below
  * we try to match their values.
  */
@@ -98,7 +97,7 @@
 	 */
 	#define CACHE_LINE 128
 #else
-	#define CACHE_LINE 128       /* A default value */
+	#define CACHE_LINE 64       /* A default value */
 #endif
 
 
@@ -198,6 +197,8 @@
 	#include <sched.h>
 #endif
 extern int ort_get_num_procs(void);
+extern int ort_get_num_procs_conf(void);
+
 
 #endif  /* __SYSDEPS_H__ */
 

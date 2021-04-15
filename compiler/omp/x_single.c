@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_single.c */
@@ -58,8 +58,7 @@ int copyprivate_arguments_from_varlist(astdecl d,
 	{
 		sa = Identifier(d->u.id);
 		ra = CommaList(ast_expr_copy(sa),
-		               UnaryOperator(UOP_sizeof,
-		                             UnaryOperator(UOP_star, Identifier(d->u.id))));
+		               UnaryOperator(UOP_sizeof, Deref(Identifier(d->u.id))));
 	}
 	else
 	{
@@ -142,6 +141,8 @@ void xform_single(aststmt *t)
 	int       stlist;   /* See comment above */
 	ompclause cp = xc_ompcon_get_clause((*t)->u.omp, OCCOPYPRIVATE),
 	          nw = xc_ompcon_get_clause((*t)->u.omp, OCNOWAIT);
+	bool      needbarrier = (nw == NULL &&
+	                         xform_implicit_barrier_is_needed((*t)->u.omp));
 
 	/*
 	 * Checks
@@ -215,8 +216,11 @@ void xform_single(aststmt *t)
 	if (cp)              /* Must output copyprivate code */
 		*t = BlockList(*t, BlockList(BarrierCall(), cprecv));
 
-	if (nw == NULL)      /* Must output a barrier */
+	if (needbarrier)
 		*t = BlockList(*t, BarrierCall());
+	else
+		if (!nw)   /* We ditched the barrier; but should at least flush */
+			*t = BlockList(*t, Call0_stmt("ort_fence")); 
 
 	if (!stlist)
 		*t = Compound(*t);

@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_arith.h */
@@ -27,7 +27,9 @@
 
 #include "ast.h"
 
+extern int xar_expr_is_zero(astexpr t);
 extern int xar_expr_is_constant(astexpr t);
+extern int xar_expr_has_constant_value(astexpr t);
 extern int xar_calc_int_expr(astexpr t, int *error);  /* error is 1 */
 
 #endif

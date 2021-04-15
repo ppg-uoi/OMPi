@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_show.h */
@@ -40,7 +40,9 @@ extern void ast_show_stderr(aststmt tree);
 extern void ast_spec_show_stderr(astspec tree);
 extern void ast_decl_show_stderr(astdecl tree);
 extern void ast_expr_show_stderr(astexpr tree);
+extern void ast_ompdir_show_stderr(ompdir tree);
 extern void ast_ompclause_show_stderr(ompclause tree);
+extern void ast_ompxli_show_stderr(ompxli tree);
 
 /* OMPi-extensions
  */

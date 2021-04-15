@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /*
@@ -46,7 +46,7 @@
 
 #include "config.h"
 
-#if defined(CAN_BIND) && (defined(__SYSCOMPILER_gcc) || defined(__SYSCOMPILER_intel))
+#if defined(HAVE_PTHREAD_AFFINITY) && (defined(__SYSCOMPILER_gcc) || defined(__SYSCOMPILER_intel))
 	#define _GNU_SOURCE
 #endif
 
@@ -56,10 +56,10 @@
 #include "ee.h"
 
 #if defined(__SYSCOMPILER_sun)
-	#undef CAN_BIND   /* Problem with CPU_SET */
+	#undef HAVE_PTHREAD_AFFINITY   /* Problem with CPU_SET */
 #endif
 
-#ifdef CAN_BIND
+#ifdef HAVE_PTHREAD_AFFINITY
 	#include <sched.h>
 #endif
 
@@ -83,6 +83,8 @@
 			}; \
 	}
 
+#define MAX_BAR_THREADS    256   /* Maximum number of threads per team */
+
 /* Types & declarations
  */
 
@@ -91,7 +93,7 @@ typedef struct othr_pool_s
 	void *arg;                    /* Argument for the thread function */
 	void *info;
 	struct  othr_pool_s *next;    /* Next node into the list */
-	volatile int spin;            /* Spin here waiting for work */
+	volatile int wait;            /* Spin here waiting for work */
 	int id;                       /* A sequential id given by OMPI */
 #ifdef __SYSOS_solaris
 	int creation_id;
@@ -99,18 +101,18 @@ typedef struct othr_pool_s
 #else
 	char pad[32];
 #endif
-} othr_pool_t;
+} thrpool_t;
 
 typedef struct
 {
 	int level;
 	volatile int *running;         /* # running threads in a team */
-	othr_pool_t  **tp;
-	int team;
-} othr_info;
+	thrpool_t  **tp;
+	int teamsize;
+} thrinfo_t;
 
 static int          pthread_lib_inited = 0;  /* To avoid re-initializations */
-static othr_pool_t  *H = NULL;                  /* Pool = a list of threads */
+static thrpool_t  *H = NULL;                  /* Pool = a list of threads */
 static volatile int plen;                          /* # threads in the pool */
 static othr_lock_t  plock;                  /* A lock for accesing the pool */
 
@@ -119,21 +121,21 @@ static othr_lock_t  plock;                  /* A lock for accesing the pool */
 #endif
 
 /* OpenMP 3.0/3.1 stuff */
-static int             threadlimit, threadscreated, levellimit, proc_bind;
+static int             threadlimit, threadsalive, levellimit, proc_bind;
 static pthread_attr_t *globalattr = NULL;      /* For stacksize */
 
 
 /* A list of blocked threads */
 static
-othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail)
+thrpool_t *_new_bunch_of_threads(int n, thrpool_t **tail)
 {
 	pthread_t   thr;
-	volatile othr_pool_t *block, *node;
+	volatile thrpool_t *block, *node;
 	int         i, e;
 	void        *threadjob(void *);
 	int         NP = ort_get_num_procs();
 
-#ifdef CAN_BIND
+#ifdef HAVE_PTHREAD_AFFINITY
 	static int  first_cpu = 0, next_cpu = 0;
 	cpu_set_t   cpuset;
 
@@ -146,22 +148,23 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail)
 				pthread_attr_init(globalattr);
 			}
 
-			if (NP > 8 * sizeof(cpuset)) NP = 8 * sizeof(cpuset); /* just in case */
+			if (NP >= CPU_SETSIZE)
+				NP = CPU_SETSIZE - 1; /* just in case */
 			if ((first_cpu = sched_getcpu()) < 0)
 				first_cpu = 0;      /* assume initial thread @ cpu 0 */
 			next_cpu = (first_cpu + 1) % NP;
 		}
 #endif
 
-	if ((block = (othr_pool_t *)ort_alloc_aligned(n * sizeof(othr_pool_t),
+	if ((block = (thrpool_t *)ort_alloc_aligned(n * sizeof(thrpool_t),
 	                                              NULL)) == NULL)
 		ort_error(5, "othr_init() failed; could not allocate memory\n");
 
 	for (i = 0, node = block; i < n; i++)
 	{
-		node->spin = 1;
+		node->wait = 1;
 		FENCE;
-		node->next = (othr_pool_t *)(node + 1);
+		node->next = (thrpool_t *)(node + 1);
 
 #ifdef __SYSOS_solaris
 		if (created_threads < NP)
@@ -174,7 +177,7 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail)
 			node->creation_id = -1;
 #endif
 
-#ifdef CAN_BIND
+#ifdef HAVE_PTHREAD_AFFINITY
 		if (proc_bind)
 			if (next_cpu != first_cpu)  /* only bind NP first threads */
 			{
@@ -190,7 +193,7 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail)
 			ort_error(5, "pthread_create() failed with %d\n", e);
 		node++;
 
-#ifdef CAN_BIND
+#ifdef HAVE_PTHREAD_AFFINITY
 		if (proc_bind)
 			if (next_cpu != first_cpu)  /* only bind NP first threads */
 			{
@@ -209,8 +212,8 @@ othr_pool_t *_new_bunch_of_threads(int n, othr_pool_t **tail)
 	}
 
 	(--node)->next = NULL;
-	if (tail) *tail = (othr_pool_t *)node;
-	return ((othr_pool_t *)block);
+	if (tail) *tail = (thrpool_t *)node;
+	return ((thrpool_t *)block);
 }
 
 
@@ -229,14 +232,15 @@ int othr_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 	caps->supports_nested            = 1;
 	caps->supports_dynamic           = 1;
 	caps->supports_nested_nondynamic = 1;
-	caps->max_levels_supported       = -1;     /* No limit */
+	caps->max_levels_supported       = 1 << 30;     /* No limit */
 	caps->default_numthreads         = nthr;
-	caps->max_threads_supported      = -1;     /* no limit */
+	caps->max_threads_supported      = 1 << 30;     /* no limit */
+	caps->supports_proc_binding      = 0;
 
 	if (pthread_lib_inited) return (0);
 
 	threadlimit    = icv->threadlimit;
-	threadscreated = 0;
+	threadsalive = 0;
 	levellimit     = icv->levellimit;
 	proc_bind      = icv->proc_bind;
 
@@ -257,7 +261,7 @@ int othr_initialize(int *argc, char ***argv, ort_icvs_t *icv, ort_caps_t *caps)
 #endif
 
 		H = _new_bunch_of_threads(nthr, NULL);     /* Create the initial pool */
-		threadscreated = nthr + 1;
+		threadsalive = nthr + 1;
 		othr_init_lock(&plock, ORT_LOCK_SPIN);
 	}
 
@@ -273,10 +277,10 @@ void othr_finalize(int exitvalue)
 
 
 /* The function executed by each thread */
-void *threadjob(void *env)
+void *persistent_thread(void *env)
 {
-	volatile othr_info *myinfo;
-	volatile othr_pool_t *env_t = (othr_pool_t *)env;
+	volatile thrinfo_t *myinfo;
+	volatile thrpool_t *env_t = (thrpool_t *)env;
 
 #ifdef __SYSOS_solaris
 	if (env_t->creation_id != -1)
@@ -286,9 +290,9 @@ void *threadjob(void *env)
 	while (1)
 	{
 		/* Wait for work */
-		WAIT_WHILE(env_t->spin, WORKER_YIELD);
+		WAIT_WHILE(env_t->wait, WORKER_YIELD);
 
-		env_t->spin = 1;                  /* Prepare me for next round */
+		env_t->wait = 1;                  /* Prepare me for next round */
 		ort_ee_dowork(env_t->id, env_t->arg); /* Execute requested code */
 
 		myinfo = env_t->info;             /* Moved this up - thanks to M-CC */
@@ -299,10 +303,10 @@ void *threadjob(void *env)
 
 
 /* Request for "numthr" threads to execute parallelism in level "level" */
-int othr_request(int numthr, int level)
+int othr_request(int numthr, int level, int oversubscribe)
 {
 	int         new, tmpplen;
-	othr_pool_t *bunch, *tail;
+	thrpool_t *bunch, *tail;
 
 	if (level == 1)      /* Only the master thread is here, no need for locking */
 	{
@@ -311,14 +315,14 @@ int othr_request(int numthr, int level)
 		else
 		{
 			new = numthr - plen;
-			if (threadlimit != -1 && new + threadscreated > threadlimit)
-				new = threadlimit - threadscreated;
+			if (threadlimit != -1 && new + threadsalive > threadlimit)
+				new = threadlimit - threadsalive;
 
 			bunch = _new_bunch_of_threads(new, &tail);
 			tail->next = H;
 			H = bunch;
 
-			threadscreated += new;
+			threadsalive += new;
 			numthr = plen + new;
 			plen = 0;
 		}
@@ -337,10 +341,10 @@ int othr_request(int numthr, int level)
 		else
 		{
 			new = numthr - plen;
-			if (threadlimit != -1 && new + threadscreated > threadlimit)
-				new = threadlimit - threadscreated;
+			if (threadlimit != -1 && new + threadsalive > threadlimit)
+				new = threadlimit - threadsalive;
 
-			threadscreated += new;
+			threadsalive += new;
 			tmpplen = plen;
 			plen = 0;
 			othr_unset_lock(&plock);
@@ -362,20 +366,20 @@ int othr_request(int numthr, int level)
 /* Dispatches numthreads from the pool and gives them work to do */
 void othr_create(int numthr, int level, void *arg, void **info)
 {
-	volatile othr_pool_t *p;
-	volatile othr_info   *t = (othr_info *) *info;
+	volatile thrpool_t *p;
+	volatile thrinfo_t   *t = (thrinfo_t *) *info;
 	int         i;
 
 	if (t == NULL)  /* Thread becomes a parent for the first time */
 	{
-		t = (othr_info *) ort_alloc_aligned(sizeof(othr_info), NULL);
+		t = (thrinfo_t *) ort_alloc_aligned(sizeof(thrinfo_t), NULL);
 		t->running = (volatile int *) ort_alloc_aligned(MAX_BAR_THREADS * sizeof(int),
 		                                                NULL);
-		t->tp = (othr_pool_t **) ort_alloc_aligned(MAX_BAR_THREADS * sizeof(
-		                                             othr_pool_t *), NULL);
+		t->tp = (thrpool_t **) ort_alloc_aligned(MAX_BAR_THREADS * sizeof(
+		                                             thrpool_t *), NULL);
 	}
 
-	t->team = numthr;
+	t->teamsize = numthr;
 	t->level = level;
 
 	/* Wake up "nthr" threads and give them work to do */
@@ -386,12 +390,12 @@ void othr_create(int numthr, int level, void *arg, void **info)
 			H = H->next;
 
 			t->running[i] = 1;
-			t->tp[i - 1] = (othr_pool_t *)p;
+			t->tp[i - 1] = (thrpool_t *)p;
 
 			p->arg  = arg;
-			p->info = (othr_info *)t;
+			p->info = (thrinfo_t *)t;
 			p->id   = i;
-			p->spin = 0;   /* Release thread i */
+			p->wait = 0;   /* Release thread i */
 
 			FENCE;
 		}
@@ -404,17 +408,17 @@ void othr_create(int numthr, int level, void *arg, void **info)
 			othr_unset_lock(&plock);
 
 			t->running[i] = 1;
-			t->tp[i - 1] = (othr_pool_t *)p;
+			t->tp[i - 1] = (thrpool_t *)p;
 
 			p->arg  = arg;
-			p->info = (othr_info *)t;
+			p->info = (thrinfo_t *)t;
 			p->id   = i;
-			p->spin = 0;   /* Release thread i */
+			p->wait = 0;   /* Release thread i */
 
 			FENCE;
 		}
 
-	*info = (othr_info *)t;
+	*info = (thrinfo_t *)t;
 }
 
 
@@ -423,29 +427,47 @@ void othr_create(int numthr, int level, void *arg, void **info)
  */
 void othr_waitall(void **info)
 {
-	volatile othr_info *t = *info;
+	volatile thrinfo_t *t = *info;
 	int i;
 	volatile int *x;
 
-	for (i = 1; i <= t->team; i++)
+	for (i = 1; i <= t->teamsize; i++)
 	{
 		x = &(t->running[i]);
 		WAIT_WHILE((*x == 1), MASTER_YIELD);
 	}
 
-	for (i = 0; i < (t->team) - 1; i++)
+	for (i = 0; i < (t->teamsize) - 1; i++)
 		t->tp[i]->next = t->tp[i + 1];              /* Re-enter the pool */
 
 	if (t->level != 0)
 		othr_set_lock(&plock);
 
-	t->tp[(t->team) - 1]->next = H;
+	t->tp[(t->teamsize) - 1]->next = H;
 	H = t->tp[0];
 
-	plen += t->team;
+	plen += t->teamsize;
 
 	if (t->level != 0)
 		othr_unset_lock(&plock);
+}
+
+
+int othr_bindme(int **places, int pindex)
+{
+	return (-1); /* Binding is unavailable */
+}
+
+
+int othr_getselfid(void)
+{
+	return (-1); // Invalid ID
+}
+
+
+void *othr_getself(unsigned int *size)
+{
+	return NULL;
 }
 
 

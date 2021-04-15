@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_copy.h -- create a copy of an AST */
@@ -32,9 +32,11 @@ extern astexpr   ast_expr_copy(astexpr tree);
 extern aststmt   ast_stmt_copy(aststmt stmt);
 extern astdecl   ast_decl_copy(astdecl tree);
 extern astspec   ast_spec_copy(astspec tree);
+extern asmop     ast_asmop_copy(asmop tree);
 extern ompcon    ast_ompcon_copy(ompcon tree);
 extern ompdir    ast_ompdir_copy(ompdir tree);
 extern ompclause ast_ompclause_copy(ompclause tree);
+extern ompxli    ast_ompxli_copy(ompxli xl);
 
 /* Special versions that discard storage class specifiers; the first one
  * adds an "int" if what remains is empty.

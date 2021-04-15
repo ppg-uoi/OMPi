@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* dfa.h */
@@ -47,9 +47,7 @@ SET_TYPE_DEFINE(dfa, symbol, char, 389)
 
 #define NCASES 12
 
-typedef struct _dfa_params *dfa_t;
-
-typedef struct _autoScopeSets
+typedef struct
 {
 	set(dfa) autoShared;
 	set(dfa) autoPrivate;
@@ -59,54 +57,11 @@ typedef struct _autoScopeSets
 	set(dfa) autoAllVars;
 	set(dfa) autoAuto;
 	int      line;
-} autoScopeSets;
+} autoshattr_t;
 
-typedef struct _dfa_func
-{
-	aststmt funcBody;    /* For non-external functions (NULL otherwise) */
-	symbol  funcName;
-	struct _dfa_func *next;
-} dfa_func_t;
-
-extern dfa_func_t *dfa_funcListStart;
-extern void addToFuncList(symbol f, aststmt fBody, dfa_func_t **);
-
-typedef struct _parNode
-{
-	struct _parNode *next;
-	int line;
-	autoScopeSets a;
-} parNode;
-
-extern parNode *parListStart;
-
-typedef struct _autoSym
-{
-	symbol s;
-	int active[NCASES];
-	int current[NCASES];
-	struct _autoSym *next;
-} autoSym;
-
-extern void freeFuncList();
-
-struct _dfa_params
-{
-	int      writing, func, readWrite, isReference,
-	         noWait, isAutoVar, isInParallelFor, foundNested,
-	         clauses;
-	symbol   parForIndex;
-	set(dfa) R, unkSet, reductionSet, dataRaceSet, ignoreSet, parIndexSet, local,
-	         funcSet;
-	set(dfa) wSolo, wSoloOld, rSolo, rSoloOld, allVarsSet, W, RW, WR, autoSet,
-	         notAutoSet;
-	autoSym *symListStart;
-	int      dirCase;
-};
-
-extern aststmt find_func(symbol f, dfa_func_t *list);
-extern parNode *isInAutoList(int l);
-extern autoScopeSets dfa_analyse(aststmt tree);
-extern void dfa_removeFromAutoList(int l);
+extern void dfa_userfunc_add(symbol f, aststmt fBody);
+extern autoshattr_t dfa_analyse(aststmt tree);
+extern autoshattr_t *dfa_parreg_get_results(int line);
+extern void dfa_parreg_remove(int line);
 
 #endif /* __DFA_H__ */

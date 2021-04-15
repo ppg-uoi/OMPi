@@ -1,4 +1,18 @@
 +---------------------------------------------------------------------------+
+| Version 2.5.0                                                             |
++---------------------------------------------------------------------------+
+This is a major milestone, which includes many improvements as well as new 
+features:
+
+  + Support for all OpenMP 4.5 target-related device directives and runtime 
+    functions; partial support for OpenMP 5.0
+  + Affinity control and places conforming to OpenMP 5.1 
+  + Task dependencies
+  + Doacross loops
+  + Re-structured runtime system
+  * Bug fixes and performance improvements
+
++---------------------------------------------------------------------------+
 | Version 2.0.0                                                             |
 +---------------------------------------------------------------------------+
 This version represents a major re-organization of OMPi. 

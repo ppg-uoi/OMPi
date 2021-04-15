@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_types.c -- transformations related to usertypes, structs & declarations */
@@ -292,7 +292,11 @@ void xt_barebones_decl(astdecl d)
  * copy is produced if it is already an abstract declarator).
  * Through the recursion, orig may not be a DECLARATOR at some point.
  * Anyways, there are only 4 possibilities if you look at the grammar.
- */
+ * The original declarator is not touched (can be freed).
+ *
+ * NOTE:
+ * If orig is just an identifier (no specs), then NULL is returned.
+*/
 astdecl xt_concrete_to_abstract_declarator(astdecl orig)
 {
 	astdecl a = NULL, c = orig;
@@ -310,28 +314,29 @@ astdecl xt_concrete_to_abstract_declarator(astdecl orig)
 			case DPAREN:
 				assert(c->decl != NULL);
 				a = (c->decl->type == DIDENT) ? NULL :
-				    /*Added ParenDecl (Alex, Nov 14) */
-				    ParenDecl(xt_concrete_to_abstract_declarator(c->decl));
+				      /*Added ParenDecl (Alex, Nov 14) */
+				      ParenDecl(xt_concrete_to_abstract_declarator(c->decl));
 				break;
 			case DARRAY:
 				a = ArrayDecl(xt_concrete_to_abstract_declarator(c->decl),
-				              (c->spec != NULL && c->spec->type == SPEC
-				               && c->spec->subtype == SPEC_star) ?
-				              ast_spec_copy(c->spec) : NULL,
+				              (c->spec != NULL && c->spec->type == SPEC &&
+				               c->spec->subtype == SPEC_star) ?
+				                 ast_spec_copy(c->spec) : NULL,
 				              ast_expr_copy(c->u.expr));
 				break;
 			case DFUNC:
 				a = FuncDecl(xt_concrete_to_abstract_declarator(c->decl),
-				             (c->u.params && c->u.params->type == DLIST
-				              && c->u.params->subtype == DECL_idlist) ?
-				             NULL : ast_decl_copy(c->u.params));
+				             (c->u.params && c->u.params->type == DLIST &&
+				              c->u.params->subtype == DECL_idlist) ?
+				                NULL : ast_decl_copy(c->u.params));
 				break;
 			default:
 				fprintf(stderr, "[c2a declarator]: c->decl->type = %d%s BUG !?\n",
 				        c->decl->type, isdor ? ", isdor=1" : ".");
 		};
 	if (isdor)
-		a = AbstractDeclarator(ast_spec_copy(orig->spec), a);
+		a = (a || orig->spec) ? AbstractDeclarator(ast_spec_copy(orig->spec), a) 
+		                      : NULL;    /* VVD, 3/2020 */
 	return (a);
 }
 
@@ -694,6 +699,7 @@ void xt_directdecl_array2pointer(astdecl d)
 		/* direct_declarator cases */
 		case DPAREN:         /* cannot have (id)[10] -- see parser.y */
 			xt_decl_array2pointer(d->decl);
+			break;
 		case DIDENT:         /* nothing to do here */
 		case DFUNC:
 			break;
@@ -747,6 +753,6 @@ void xt_decl_array2pointer(astdecl d)
 		default:
 			fprintf(stderr, "[xt_decl_array2pointer]: !? BUG !? (type = %d):\n",
 			        d->type);
-			ast_decl_show(d);
+			ast_decl_show_stderr(d);
 	}
 }

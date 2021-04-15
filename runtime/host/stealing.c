@@ -17,15 +17,13 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-#include "ort_prive.h"
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include "ort_prive.h"
 
-#define FAILURE 0
-#define SUCCESS 1
 
 /* Allocate memory for my group task queues */
 inline void ort_task_queues_init(ort_eecb_t *me, int nthr)
@@ -38,14 +36,13 @@ inline void ort_task_queues_init(ort_eecb_t *me, int nthr)
 	{
 		me->tasking.queue_table = (ort_task_queue_t *)
 		                          ort_calloc((nthr + 1) * sizeof(ort_task_queue_t));
-
 		for (i = 0; i < nthr + 1; i++) /* Initialize task queues */
 		{
 			me->tasking.queue_table[i].top         = 0;
 			me->tasking.queue_table[i].bottom      = 0;
 			me->tasking.queue_table[i].implicit_task_children = NULL;
 			me->tasking.queue_table[i].tasks = (ort_task_node_t **)
-			                                   ort_calloc(TASKQUEUESIZE * sizeof(ort_task_node_t *));
+			                    ort_calloc(TASKQUEUESIZE * sizeof(ort_task_node_t *));
 #if !defined(HAVE_ATOMIC_FAA) || !defined(HAVE_ATOMIC_CAS)
 			ee_init_lock((ee_lock_t *) & (me->tasking.queue_table[i].lock),
 			             ORT_LOCK_NORMAL);
@@ -57,26 +54,22 @@ inline void ort_task_queues_init(ort_eecb_t *me, int nthr)
 	{
 		if (me->tasking.max_children < nthr + 1)  /* realloc needed */
 		{
-			for (i = 0; i < me->tasking.max_children; i++) /* Initialize task queues */
+			for (i = 0; i < me->tasking.max_children; i++)   /* Init task queues */
 				free(me->tasking.queue_table[i].tasks);
 
 			/* Reallocate queue_table */
 			me->tasking.queue_table = (ort_task_queue_t *)
-			                          realloc(me->tasking.queue_table, (nthr + 1) * sizeof(ort_task_queue_t));
-
+			      realloc(me->tasking.queue_table, (nthr+1)*sizeof(ort_task_queue_t));
 			for (i = 0; i < nthr + 1; i++)
 				me->tasking.queue_table[i].tasks = (ort_task_node_t **)
-				                                   ort_calloc(TASKQUEUESIZE * sizeof(ort_task_node_t *));
-
+				                  ort_calloc(TASKQUEUESIZE * sizeof(ort_task_node_t *));
 #if !defined(HAVE_ATOMIC_FAA) || !defined(HAVE_ATOMIC_CAS)
 			for (i = me->tasking.max_children; i < nthr + 1; i++)
 				ee_init_lock((ee_lock_t *) & (me->tasking.queue_table[i].lock),
 				             ORT_LOCK_NORMAL);
 #endif
-
 			me->tasking.max_children = nthr + 1;
 		}
-
 		/* Reinitialize queue table elements */
 		for (i = 0; i < nthr + 1; i++)
 		{
@@ -88,60 +81,36 @@ inline void ort_task_queues_init(ort_eecb_t *me, int nthr)
 #endif
 }
 
+
 #if !defined(AVOID_OMPI_DEFAULT_TASKS)
 
 /* ort_task_worker_enqueue
- * This function is used by a process (worker) in order to enqueue a new
+ * This function is used by a thread (worker) in order to enqueue a new
  * task_node to its task queue.
  */
-inline int ort_task_worker_enqueue(ort_eecb_t *me, void *(*func)(void *),
-                                   void *arg, int final)
+inline void ort_task_worker_enqueue(ort_eecb_t *me, ort_task_node_t *tnode)
 {
-	ort_task_node_t *new_node;
 	int worker_id = me->thread_num;
 	ort_eecb_t *my_parent = me->sdn;
 	int old_bottom = atomic_read
 	                 (&(my_parent->tasking.queue_table[worker_id].bottom));
 
-	new_node = ort_task_alloc(func, arg);
-
-	/* Check whether i use my own task node or an inherited one */
-	if (__INHERITASK(me))
-		ort_create_task_immediate_node(me);
-
-#if !defined(HAVE_ATOMIC_FAA)
-	ee_init_lock((ee_lock_t *) & (new_node->lock), ORT_LOCK_NORMAL);
-#endif
-	new_node->func              = func;
-	/* I already have saved task fuc args */
-	new_node->num_children      = 1; /* To ensure that a task is complete before freeing it */
-	new_node->next              = NULL;
-	new_node->parent            = __CURRTASK(me);
-	new_node->icvs              = new_node->parent->icvs;
-	new_node->inherit_task_node = 0;
-	new_node->isfinal           = final;
-	new_node->taskgroup         = new_node->parent->taskgroup;
-
-	if (new_node->parent != NULL)  /* Add a new child to parent task */
+	if (tnode->parent != NULL)  /* Add a new child to parent task */
 	{
 #if defined(HAVE_ATOMIC_FAA)
-		_faa(&((new_node->parent)->num_children), 1);
+		_faa(&((tnode->parent)->num_children), 1);
 #else
-		ee_set_lock(&((new_node->parent)->lock));
-		(new_node->parent)->num_children++;
-		ee_unset_lock(&((new_node->parent)->lock));
+		ee_set_lock(&((tnode->parent)->lock));
+		(tnode->parent)->num_children++;
+		ee_unset_lock(&((tnode->parent)->lock));
 #endif
 	}
 	my_parent->tasking.queue_table[worker_id].tasks[old_bottom % TASKQUEUESIZE] =
-	  new_node;
-
+		      tnode;
 	my_parent->tasking.queue_table[worker_id].bottom++;
-
 #ifdef ORT_DEBUG
 	me->tasking.tasks_enqueued++;
 #endif
-
-	return SUCCESS;
 }
 
 
@@ -149,7 +118,7 @@ inline int ort_task_worker_enqueue(ort_eecb_t *me, void *(*func)(void *),
  * This function is used by a process (worker) in order to dequeue a
  * new task_node from its task queue.
  */
-inline ort_task_node_t  *ort_task_worker_dequeue(ort_eecb_t *me)
+inline ort_task_node_t *ort_task_worker_dequeue(ort_eecb_t *me)
 {
 	ort_task_node_t *extracting_node;
 	ort_eecb_t *my_parent = me->sdn;
@@ -189,8 +158,8 @@ inline ort_task_node_t  *ort_task_worker_dequeue(ort_eecb_t *me)
 	}
 
 	extracting_node = my_parent->tasking.queue_table[worker_id]
-	                  .tasks[atomic_read(&((my_parent->tasking.
-	                                        queue_table[worker_id]).bottom)) % TASKQUEUESIZE];
+	                  .tasks[atomic_read(&((my_parent->tasking
+	                  .queue_table[worker_id]).bottom)) % TASKQUEUESIZE];
 	if (size > 0)
 		return extracting_node;
 
@@ -228,10 +197,9 @@ inline ort_task_node_t *ort_task_thief_steal(ort_eecb_t *me, int victim_id)
 	ort_eecb_t *my_parent = me->sdn;
 	int old_top = atomic_read(&(my_parent->tasking.queue_table[victim_id].top));
 	int new_top = old_top + 1;
-	int old_bottom = atomic_read(&
-	                             (my_parent->tasking.queue_table[victim_id].bottom));
+	int old_bottom = atomic_read(
+	                         &(my_parent->tasking.queue_table[victim_id].bottom));
 	int size = old_bottom - old_top;
-
 
 	/* If my queue is almost full, it is safe to enter throttle mode */
 	if (me->thread_num == victim_id && size > (int)(TASKQUEUESIZE * 0.7))

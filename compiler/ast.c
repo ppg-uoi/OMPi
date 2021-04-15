@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* AST - the Abstract Syntax Tree */
@@ -35,9 +35,11 @@
 #include <string.h>
 #include "ast.h"
 #include "ast_copy.h"
+#include "ast_show.h"
 #include "ompi.h"
 #include "dfa.h"
 #include "set.h"
+#include "ast_free.h"
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -92,8 +94,9 @@ astexpr Constant(char *s)
 astexpr numConstant(int n)
 {
 	static char numstr[64];
-	snprintf(numstr, 63, "%d", n);
-	return (Constant(strdup(numstr)));
+	snprintf(numstr, 63, "%d", (n >= 0) ? n : -n);
+	return n >= 0 ? Constant(strdup(numstr)) : 
+	                UnaryOperator(UOP_neg, Constant(strdup(numstr)));
 }
 
 astexpr String(char *s)
@@ -161,6 +164,16 @@ astexpr TypeTrick(astdecl d)
 }
 
 
+/* Find the number of elements in a list (1 if not a COMMA/SPACE LIST) */
+int expr_list_cardinality(astexpr expr)
+{
+	if (expr->type != COMMALIST && expr->type != SPACELIST)
+		return (1);
+	return ( expr_list_cardinality(expr->left) + 
+	         expr_list_cardinality(expr->right) );
+}
+
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                               *
  *     DECLARATION NODES                                         *
@@ -189,6 +202,7 @@ astspec Specifier(enum spectype type, int subtype, symbol name, astspec body)
 	d->subtype = subtype;
 	d->name    = name;
 	d->body    = body;
+	d->sueattr = NULL;
 	d->u.next  = NULL;
 	d->l       = sc_original_line();
 	d->c       = sc_column();
@@ -213,10 +227,27 @@ astspec Specifierlist(int type, astspec e, astspec l)
 }
 
 
-astspec SUdecl(int type, symbol sym, astdecl decl)
+astspec SUdecl(int type, symbol sym, astdecl decl, astspec attr)
 {
 	astspec d = Specifier(SUE, type, sym, NULL);
+	d->sueattr = attr;
 	d->u.decl = decl;
+	return (d);
+}
+
+
+astspec Enumdecl(symbol sym, astspec body, astspec attr)
+{
+	astspec d = Specifier(SUE, SPEC_enum, sym, body);
+	d->sueattr = attr;
+	return (d);
+}
+
+
+astspec AttrSpec(char *s)
+{
+	astspec d = Specifier(ATTRSPEC, 0, NULL, NULL);
+	d->u.txt = s;
 	return (d);
 }
 
@@ -346,6 +377,28 @@ int decl_ispointer(astdecl d)
 }
 
 
+/* Determine whether the declarator is a function returning a pointer. 
+ * It ia assumed that this comes from a declaration statement or a function
+ * definition statement.
+ * We keep recursing on the decl field until we hit a DFUNC.
+ */
+int func_returnspointer(astdecl d)
+{
+	if (d == NULL) return 0;
+	
+	if (d->type == DECLARATOR)
+		if (d->decl && d->decl->type == DFUNC)
+			return (d->spec && speclist_getspec(d->spec, SPEC, SPEC_star));
+	if (d->type == DIDENT)
+		return (0);
+	else
+		if (d->type == DLIST)  /* Should never happen */
+			return (func_returnspointer(d->u.next));
+		else
+			return (func_returnspointer(d->decl));
+}
+
+
 /* Get the identifier name of the declarator.
  * d is assumed to be the declarator part of a declaration (top-level).
  * It will crash if given an ABSDECLARATOR with no identifier!
@@ -362,6 +415,34 @@ astdecl decl_getidentifier(astdecl d)
 }
 
 
+/* Finds the identifier and replaces it with a pointer to it.
+ * Returns the declarator itself.
+ */
+astdecl decl_topointer(astdecl decl)
+{
+	astdecl newdecl, id = decl_getidentifier(decl);
+
+	newdecl = ParenDecl(Declarator(Pointer(), ast_decl_copy(id)));
+	*id = *newdecl;
+	free(newdecl);
+	return (decl);
+}
+
+
+/* Finds the identifier and replaces its name.
+ * Returns the declarator itself.
+ */
+astdecl decl_rename(astdecl decl, symbol newname)
+{
+	astdecl newid, id = decl_getidentifier(decl);
+
+	newid = IdentifierDecl(newname);
+	*id = *newid;
+	free(newid);
+	return (decl);
+}
+
+
 /* Checks whether the speclist includes the given SPEC type */
 astspec speclist_getspec(astspec s, int type, int subtype)
 {
@@ -375,6 +456,119 @@ astspec speclist_getspec(astspec s, int type, int subtype)
 	if (s->type != type) return (NULL);
 	if (type != SPEC && type != STCLASSSPEC) return (s);
 	return ((s->subtype == subtype) ? s : NULL);
+}
+
+
+/* Removes the given SPEC type from the speclist (once and if present).
+ * Returns true if a removal was actually made.
+ * We assume the list is indeed a list and not a tree...
+ */
+static int speclist_delspec(astspec *s, int type, int subtype)
+{
+	astspec curr = *s, prev = NULL;
+	
+	if (*s == NULL) return (0);
+	for ( ; curr && curr->type == SPECLIST; curr = curr->u.next, prev = curr)
+	{
+		if (curr->body == NULL) continue;  /* Should never be NULL */
+		if (curr->body->type == type && ((type != SPEC && type != STCLASSSPEC) || 
+		                                 (curr->body->subtype == subtype)))
+		{
+			if (prev == NULL)                /* Found it */
+				*s = curr->u.next;
+			else
+				prev->u.next = curr->u.next;
+			ast_spec_free(curr);
+			return (1);
+		}
+	}
+	if (curr && curr->type != SPECLIST)        /* Last element */
+	{
+		if (curr->type == type && ((type != SPEC && type != STCLASSSPEC) || 
+		                                 (curr->subtype == subtype)))
+		{
+			if (prev == NULL)                /* Found it */
+				*s = NULL;
+			else
+				prev->u.next = NULL;
+			ast_spec_free(curr);
+			return (1);
+		}
+	}
+	return (0);
+}
+
+
+/* Take a pointer declarator and transform it to an array of the given size;
+ * obviously this works on non-abstract declarators.
+ * Returns NULL if not a pointer declarator.
+ */
+void decl_ptr2arr(astdecl d, astexpr size)
+{
+	if (d == NULL) 
+		return;              /* When recursing from ABSDECLARATOR */
+	if (d->type == DECLARATOR)
+	{
+		if (d->spec != NULL  && (d->decl->type == DIDENT &&
+		                         speclist_getspec(d->spec, SPEC,SPEC_star) != NULL))
+		{
+			astdecl ident = d->decl;
+			
+			speclist_delspec(&(d->spec), SPEC, SPEC_star);  /* Remove the star */
+			d->decl = ArrayDecl(ident, NULL, size);
+			return;
+		}
+	}
+	if (d->type == DIDENT)   /* Not a pointer after all */
+		return;
+	else
+		if (d->type == DLIST)  /* Should be DECL_decllist */
+			decl_ptr2arr(d->u.next, size);
+		else
+			decl_ptr2arr(d->decl, size);
+}
+
+
+/* This takes an array declarator and reduces it to a simple pointer
+ */
+void decl_arr2ptr(astdecl d)
+{
+	if (!d);
+	switch (d->type)
+	{
+		case DECLARATOR:
+			decl_arr2ptr(d->decl);
+			break;
+		case DPAREN:         /* cannot have (id)[10] -- see parser.y */
+			decl_arr2ptr(d->decl);
+			break;
+		case DARRAY:
+			if (d->decl->type != DIDENT)
+				decl_arr2ptr(d->decl);
+			else   /* Got it */
+			{
+				astdecl t = ParenDecl(Declarator(Pointer(), d->decl));
+				if (d->u.expr) ast_expr_free(d->u.expr);
+				if (d->spec)   ast_spec_free(d->spec);
+				*d = *t;
+				free(t);
+			}
+			break;
+	}
+}
+
+
+/* Find the number of top-level elements in an initializer (DINIT) */
+int decl_initializer_cardinality(astdecl decl)
+{
+	int     count;
+	astexpr expr = decl->u.expr;
+	
+	if (decl->type != DINIT)    /* No initializer */
+		return (0);              
+	if (expr->type != BRACEDINIT)     /* No braces */
+		return (1);
+	return ( expr_list_cardinality(expr->left) );
 }
 
 
@@ -482,7 +676,7 @@ aststmt FuncDef(astspec spec, astdecl decl, aststmt dlist, aststmt body)
 	/***************** Agelos ***************************************/
 	/* We store the funcdef node for interprocedural data flow analysis purposes.
 	* **************************************************************/
-	addToFuncList(decl->decl->decl->u.id, ast_stmt_copy(body), &dfa_funcListStart);
+	dfa_userfunc_add(decl->decl->decl->u.id, ast_stmt_copy(body));
 
 	return (s);
 }
@@ -526,6 +720,42 @@ aststmt verbit(char *format, ...)
 }
 
 
+asmop AsmOp(astexpr id, char *con, astexpr var, asmop op, asmop nxt)
+{
+	asmop s = smalloc(sizeof(struct asmop_));
+	s->symbolicname = id;
+	s->constraint = con;
+	s->var = var;
+	s->next = op;
+	s->op = nxt;
+	return (s);
+}
+
+
+asmnode Asmnode(astspec qual, char *tpl, 
+                asmop out, asmop in, astexpr clob, astexpr labs)
+{
+	asmnode s = smalloc(sizeof(struct asmnode_));
+	s->qualifiers = qual;
+	s->template   = tpl;
+	s->clobbers   = clob;
+	s->labels     = labs;
+	s->ins        = in;
+	s->outs       = out;
+	return (s);
+}
+
+
+/* Inline assembly (asm) statements */
+aststmt AsmStmt(int subtype, astspec qual, char *tpl, 
+                asmop out, asmop in, astexpr clob, astexpr labs)
+{
+	aststmt s = Statement(ASMSTMT, subtype, NULL);
+	s->u.assem = Asmnode(qual, tpl, out, in, clob, labs);
+	return (s);
+}
+
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *                                                               *
  *     OPENMP NODES                                              *
@@ -542,7 +772,14 @@ char *clausenames[] = { NULL, "nowait", "if", "num_threads", "ordered",
                         "final", "mergeable",  /* OpenMP 3.1 */
                         /* OpenMP 4.0 */
                         "proc_bind", "map", "device", "to", "from", "parallel",
-                        "sections", "for", "taskgroup"
+                        "sections", "for", "taskgroup", "depend", 
+                        "num_teams", "thread_limit",
+                        /* OpenMP 4.5 */
+                        "hint", "priority", "is_device_ptr", "use_device_ptr",
+                        "threads", "link", "defaultmap(tofrom:scalar)",
+                        "ordered",
+                        /* Aggelos */
+                        "auto"
                       };
 char *clausesubs[] =  { "static", "dynamic", "guided", "runtime",
                         "shared", "none", "+", "*", "-", "&", "|",
@@ -550,7 +787,19 @@ char *clausesubs[] =  { "static", "dynamic", "guided", "runtime",
                         "min", "max",          /* OpenMP 3.1 */
                         /* OpenMP 4.0 */
                         "master", "close", "spread",
-                        "alloc", "to", "from", "tofrom"
+                        "alloc", "to", "from", "tofrom",
+                        "in", "out", "inout",
+                        /* OpenMP 4.5 */
+                        "source", "sink", "release", "delete",
+                        /* OpenMP 4.5 modifiers */
+                        "always",
+			/* OpenMP 5.1 */
+			"primary"
+                      };
+char *clausemods[]  = { NULL, "always", "monotonic", "nonmonotonic", "simd",
+                        "parallel", "task", "target", "target data",
+                        "target enter data", "target exit data", 
+                        "target update", "cancel"
                       };
 char *ompdirnames[] = { NULL, "parallel", "for", "sections", "section",
                         "single", "parallel for", "parallel sections",
@@ -561,18 +810,45 @@ char *ompdirnames[] = { NULL, "parallel", "for", "sections", "section",
                         /* OpenMP 4.0 */
                         "target", "target data", "target update",
                         "declare target", "cancel", "cancellation point",
-                        "taskgroup"
+                        "taskgroup", "teams", "target teams",
+                        /* OpenMP 4.5 */
+                        "target enter data", "target exit data"
                       };
 
 
+/* (OpenMP 4.0) Extended lists of variables or array sections */
+ompxli OmpXLItem(enum ompxli_type type, symbol id, omparrdim dim)
+{
+	ompxli x   = smalloc(sizeof(struct ompxli_));
+	x->xlitype = type;
+	x->id      = id;
+	x->dim     = dim;
+	x->next    = NULL;
+	x->l       = sc_original_line();
+	x->c       = sc_column();
+	x->file    = Symbol(sc_original_file());
+	return (x);
+}
+
+
+omparrdim OmpArrDim(astexpr lb, astexpr len)
+{
+	omparrdim d = smalloc(sizeof(struct omparrdim_));
+	d->lb       = lb;
+	d->len      = len;
+	d->next     = NULL;
+}
+
+
 ompclause
-OmpClause(enum clausetype type, enum clausesubt subtype, astexpr expr,
+OmpClause(ompclt_e type, ompclsubt_e subtype, ompclmod_e mod, astexpr expr,
           astdecl varlist)
 {
 	ompclause c    = smalloc(sizeof(struct ompclause_));
 	c->parent      = NULL;
 	c->type        = type;
 	c->subtype     = subtype;
+	c->modifier    = mod;
 	if (varlist == NULL)
 		c->u.expr    = expr;
 	else
@@ -584,9 +860,18 @@ OmpClause(enum clausetype type, enum clausesubt subtype, astexpr expr,
 }
 
 
+ompclause 
+OmpXlistClause(ompclt_e type, ompclsubt_e subtype, ompclmod_e mod, ompxli xlist)
+{
+	ompclause c = OmpClause(type, subtype, mod, NULL, NULL);
+	c->u.xlist  = xlist;
+	return (c);
+}
+
+
 ompclause OmpClauseList(ompclause next, ompclause elem)
 {
-	ompclause c    = OmpClause(OCLIST, 0, NULL, NULL);
+	ompclause c    = OmpClause(OCLIST, 0, OCM_none, NULL, NULL);
 	c->u.list.elem = elem;
 	c->u.list.next = next;
 	return (c);
@@ -607,9 +892,9 @@ ompdir OmpDirective(enum dircontype type, ompclause cla)
 }
 
 
-ompdir OmpCriticalDirective(symbol r)
+ompdir OmpCriticalDirective(symbol r, ompclause cla)
 {
-	ompdir d = OmpDirective(DCCRITICAL, NULL);
+	ompdir d = OmpDirective(DCCRITICAL, cla);
 	d->u.region = r;
 	return (d);
 }
@@ -652,10 +937,11 @@ ompcon OmpConstruct(enum dircontype type, ompdir dir, aststmt body)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
-char *oxclausenames[15] = { NULL, "IN", "OUT", "INOUT", "<list>", "reduction",
+char *oxclausenames[19] = { NULL, "IN", "OUT", "INOUT", "<list>", "reduction",
                             "atnode", "atnode(*)", "detached", "tied",
                             "untied", "stride", "start", "scope",
-                            "atworker"
+                            "atworker", "if", "atnode(here)", "atnode(remote)",
+                            "hints"
                           };
 char *oxdirnames[5] = { NULL, "taskdef", "task", "tasksync", "taskschedule" };
 
@@ -848,6 +1134,8 @@ void ast_stmt_parent(aststmt parent, aststmt t)
 				ast_stmt_parent(t, t->u.declaration.dlist);
 			ast_stmt_parent(t, t->body);    /* always non-NULL */
 			break;
+		case ASMSTMT:
+			break;
 		case OMPSTMT:
 			/* The parent of the construct and its body is this node here */
 			ast_ompcon_parent(t, t->u.omp);
@@ -871,6 +1159,54 @@ void ast_parentize(aststmt tree)
 }
 
 
+/**
+ * Add a statement before another statement in-place
+ *
+ * @param where The old statement
+ * @param what  The statement you want to insert
+ */
+void ast_stmt_prepend(aststmt where, aststmt what)
+{
+	aststmt cp = smalloc(sizeof(struct aststmt_));
+
+	*cp = *where;                    // Copy the original
+
+	where->type    = STATEMENTLIST;  // Make it a block list
+	where->subtype = 0;
+
+	where->body    = cp;             // First the original one
+	where->u.next  = what;           // Then the new one
+
+	where->parent = cp->parent;      // Parentize
+	cp->parent = where;
+	what->parent = where;
+}
+
+
+/**
+ * Add a statement after another statement in-place
+ *
+ * @param where The old statement
+ * @param what  The statement you want to insert
+ */
+void ast_stmt_append(aststmt where, aststmt what)
+{
+	aststmt cp = smalloc(sizeof(struct aststmt_));
+
+	*cp = *where;                    // Copy the original
+
+	where->type    = STATEMENTLIST;  // Make it a block list
+	where->subtype = 0;
+
+	where->body    = what;           // First the new one
+	where->u.next  = cp;             // Then the original one
+
+	where->parent = cp->parent;      // Parentize
+	cp->parent = where;
+	what->parent = where;
+}
+
+
 /* Given a statement, we return the function it belongs to.
  */
 aststmt ast_get_enclosing_function(aststmt t)
@@ -878,6 +1214,18 @@ aststmt ast_get_enclosing_function(aststmt t)
 	for (; t != NULL && t->type != FUNCDEF; t = t->parent)
 		;     /* Go up the tree till we hit our current FUNCDEF */
 	return (t);
+}
+
+
+/* Prepends a specifier to a declaration or function definition statement */
+void ast_declordef_addspec(aststmt orig, astspec spec)
+{
+	if (orig->type != DECLARATION && orig->type != FUNCDEF)
+		warning("[ast_declordef_addspec]: (bug) expected a declaration or "
+		        "function definition\n\tbut got a node of type %d instead.\n", 
+		        orig->type);
+	else
+		orig->u.declaration.spec = Speclist_right(spec, orig->u.declaration.spec);
 }
 
 

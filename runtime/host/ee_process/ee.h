@@ -17,12 +17,11 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* This is the pthreads threading library for OMPi
  */
-
 
 #ifndef __EE_H__
 #define __EE_H__
@@ -64,25 +63,34 @@ typedef union
 
 /* Base functions */
 
-extern void oprc_shm_free(int *p);
-extern void oprc_shmalloc(void **p, size_t size, int *memid);
-extern int  oprc_initialize(int *argc, char ***argv,
-                            ort_icvs_t *icv, ort_caps_t *cap);
-extern void oprc_finalize(int exitvalue);
-extern int  oprc_request(int numthreads, int level);
-extern void oprc_create(int numthreads, int level, void *arg,
-                        void **info);
-extern void oprc_waitall(void **info);
-#define oprc_yield() sched_yield()
+extern void  oprc_shm_free(int *p);
+extern void  oprc_shmalloc(void **p, size_t size, int *memid);
+extern int   oprc_initialize(int *argc, char ***argv,
+                             ort_icvs_t *icv, ort_caps_t *cap);
+extern void  oprc_finalize(int exitvalue);
+extern int   oprc_request(int numthreads, int level, int oversubscribe);
+extern void  oprc_create(int numthreads, int level, void *arg,
+                         void **info);
+extern void  oprc_waitall(void **info);
+extern int   oprc_bindme(int **places, int pindex);
+extern int   oprc_getselfid(void);
+extern void *oprc_getself(unsigned int *size);
+/* DON'T put parentheses! */
+#define oprc_yield sched_yield
+
 #define EE_TYPE_PROCESS
+
 /* Thread-specifics */
+#ifdef TLS_KEYWORD
+	#define USE_TLS  /* This is only for ort.c */
+#endif
 #define oprc_key_t            pthread_key_t
 #define oprc_key_create(a,b)  pthread_key_create(a,b)
 #define oprc_getspecific(a)   pthread_getspecific(a)
 #define oprc_setspecific(a,b) pthread_setspecific(a,b)
 
 /* Locks */
-extern void   *oprc_init_lock(oprc_lock_t *lock, int type);
+extern void *oprc_init_lock(oprc_lock_t *lock, int type);
 extern int  oprc_destroy_lock(oprc_lock_t *lock);
 extern int  oprc_set_lock(oprc_lock_t *lock);
 extern int  oprc_unset_lock(oprc_lock_t *lock);

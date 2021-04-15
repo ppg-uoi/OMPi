@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* ast_traverse.h -- generic traversal of the AST using callbacks @ each node */
@@ -46,6 +46,7 @@ typedef struct {
 	void (*funcdef_c)(aststmt t, void *starg, int vistime);
 	void (*stmtlist_c)(aststmt t, void *starg, int vistime);
 	void (*verbatim_c)(aststmt t, void *starg, int vistime);
+	void (*asmstmt_c)(aststmt t, void *starg, int vistime);
 } stmtcbs_t;
 
 typedef struct {
@@ -130,8 +131,12 @@ typedef struct {
 #define PREPOSTVISIT (PREVISIT | POSTVISIT)
 #define MIDVISIT  4  /* Only used in ASS_OP, DECLARATION */
 
+#define LRORDER   1  /* Left-then-right part of assignments (default) */
+#define RLORDER   2  /* Right-then-left */
+
 typedef struct {
 	int        when;        /* PRE/POST/MID visit */
+	int        lrorder;     /* LR/RL: order of visit the 2 sides of assignments */
 
 	int        doexpr;      /* Set to false to avoid visiting such nodes */
 	int        dospec;

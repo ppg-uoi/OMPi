@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* callgraph.h */
@@ -27,6 +27,7 @@
 
 #include "ast.h"
 #include "ast_traverse.h"
+#include "set.h"
 
 /* In the following struct:
  * - nint is the number of internal functions defined in the user code
@@ -41,8 +42,19 @@ typedef struct {
 	char   **cgmat;      /* the callgraph matrix */
 } cg_t;
 
+/* Set type for (key: symbol, value: dontcare) */
+SET_TYPE_DEFINE(cgfun, symbol, char, 93)
+
+/* This is the first function that should be called; it is a prerequisite
+ * for the others to work. 
+ */
+extern void cg_find_defined_funcs(aststmt tree);
+
 /* t can be any statement */
-extern cg_t *call_graph(aststmt wholetree, aststmt t);
-extern void call_graph_test(aststmt wholetree);
+extern cg_t *cg_build_call_graph(aststmt t);
+extern set(cgfun) cg_find_called_funcs(aststmt t);
+
+extern void cg_call_graph_test(aststmt wholetree);
+extern void cg_defuncs_debug();
 
 #endif

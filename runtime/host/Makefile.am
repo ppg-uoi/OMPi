@@ -17,7 +17,7 @@
 #
 #    You should have received a copy of the GNU General Public License
 #    along with OMPi; if not, write to the Free Software
-#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #
 ##   This file must be processed by automake
 
@@ -30,7 +30,7 @@ DIST_SUBDIRS = @libpaths@
 SUBDIRS=@ortlibpath@
 
 # More files (needed for making the distribution)
-EXTRA_DIST = ort.h ort_prive.h sysdeps.h params.h dataenv.h LibraryTemplate
+EXTRA_DIST = ort.h ort_prive.h sysdeps.h params.h targdenv.h LibraryTemplate
 
 # Create the default directories if needed
 install-data-hook:

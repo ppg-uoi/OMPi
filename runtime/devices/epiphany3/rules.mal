@@ -1,0 +1,187 @@
+#
+# MAL rules for the epiphany3 device
+#
+
+flavors = [
+	"devpart-noopenmp",
+	"devpart", 
+	"devpart-blockingws",
+	"devpart-blockingws-only-task-single",  
+	"devpart-only-parallel", 
+	"devpart-only-parallel-reduction", 
+	"devpart-only-atomic", 
+	"devpart-noexpltasks", 
+	"devpart-noexpltasks-blockingws", 
+	"devpart-only-static-ordered-for", 
+	"devpart-only-static-for", 
+	"devpart-only-static-guided-dynamic-for",
+	"devpart-only-single", 
+	"devpart-only-critical",
+	"devpart-only-parallel-locks",
+	"devpart-only-tasks",
+	"devpart-only-tasks-1icv"
+]
+
+nodes = [
+	openmp = {
+		has(openmp),
+		true: "hasexpltasks",
+		false: "devpart-noopenmp"
+	},
+	hasexpltasks = {
+		has(tasks),
+		true: "hasonlyexpltasks",
+		false: "hasonlyparallel"
+	},
+	hasonlyexpltasks = {
+		has(parallel),
+		true: "hasonlyexpltasks2",
+		false: "hasnowait"
+	},
+	hasonlyexpltasks2 = {
+		has(parallel),
+		true: "devpart-only-tasks",
+		false: "hasnowait"
+	},
+	hasnowait = {
+		has(nowait),
+		true: "devpart",
+		false: "hasonlysingle"
+	},
+	hasonlysingle = {
+		has(parallel),
+		true: "hasonlysingle2",
+		false: "devpart-blockingws"
+	},
+	hasonlysingle2 = {
+		has(single),
+		true: "hasonlysingle3",
+		false: "devpart-blockingws"
+	},
+	hasonlysingle3 = {
+		num(totalmetrics),
+		==3: "devpart-blockingws-only-task-single",
+		!=3: "devpart-blockingws"
+	},
+	hasonlyparallel = {
+		hasonly(parallel),
+		true: "devpart-only-parallel",
+		false: "hasonlyatomic"
+	},
+	hasonlyatomic = {
+		has(atomic),
+		true: "hasonlyatomic2",
+		false: "hasonlyreduction"
+	},
+	hasonlyatomic2 = {
+		has(parallel),
+		true: "hasonlyatomic3",
+		false: "hasonlyreduction"
+	},
+	hasonlyatomic3 = {
+		num(totalmetrics),
+		==2: "devpart-only-atomic",
+		!=2: "hasonlyreduction"
+	},
+	hasonlyreduction = {
+		has(reduction),
+		true: "hasonlyreduction2",
+		false: "hassection"
+	},
+	hasonlyreduction2 = {
+		has(parallel),
+		true: "hasonlyreduction3",
+		false: "hassection"
+	},
+	hasonlyreduction3 = {
+		num(totalmetrics),
+		==2: "devpart-only-parallel-reduction",
+		!=2: "hassection"
+	},
+	hassection = {
+		has(sections),
+		true: "hasnowait2",
+		false: "haslocks"
+	},
+	haslocks = {
+		has(haslocks),
+		true: "hasonlylocks",
+		false: "hasonlyfor"
+	},
+	hasonlylocks = {
+		has(parallel),
+		true: "hasonlylocks2",
+		false: "hasnowait2"
+	},
+	hasonlylocks2 = {
+		num(totalmetrics),
+		==2: "devpart-only-parallel-locks",
+		!=2: "hasnowait2"
+	},
+	hasnowait2 = {
+		has(nowait),
+		true: "devpart-noexpltasks",
+		false: "devpart-noexpltasks-blockingws"
+	},
+	hasonlyfor = {
+		has(for),
+		true: "hasonlyfor2",
+		false: "shasonlysinglesec"
+	},
+	hasonlyfor2 = {
+		has(parallel),
+		true: "hasonlyfor3" ,
+		false: "shasonlysinglesec"
+	},
+	hasonlyfor3 = {
+		num(totalmetrics),
+		==2: "devpart-only-static-for",
+		==3: "hasordered",
+		!=2: "shasonlysinglesec"
+	},
+	hasordered = {
+		has(ordered),
+		true: "devpart-only-static-ordered-for",
+		false: "shasonlysinglesec"
+	},
+	shasonlysinglesec = {
+		hasonly(single),
+		true: "devpart-only-single",
+		false: "hasonlysinglesec"
+	},
+	hasonlysinglesec = {
+		has(parallel),
+		true: "hasonlysinglesec2",
+		false: "hasonlycritical"
+	},
+	hasonlysinglesec2 = {
+		has(single),
+		true: "hasonlysinglesec3",
+		false: "hasonlycritical"
+	},
+	hasonlysinglesec3 = {
+		num(totalmetrics),
+		==2: "devpart-only-single",
+		!=2: "hasonlycritical"
+	},
+	hasonlycritical = {
+		has(criticals),
+		true: "hasonlycritical2",
+		false: "hasonlyuncritical"
+	},
+	hasonlyuncritical = {
+		has(uncritical),
+		true: "hasonlycritical2",
+		false: "devpart-noexpltasks-blockingws"
+	},
+	hasonlycritical2 = {
+		has(parallel),
+		true: "hasonlycritical3",
+		false: "devpart-noexpltasks-blockingws"
+	},
+	hasonlycritical3 = {
+		num(totalmetrics),
+		==2: "devpart-only-critical",
+		!=2: "devpart-noexpltasks-blockingws"
+	}
+]

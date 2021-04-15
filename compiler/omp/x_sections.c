@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* x_sections.c -- complete */
@@ -31,6 +31,7 @@
 #include "ast_copy.h"
 #include "x_sections.h"
 #include "x_clauses.h"
+#include "x_reduction.h"
 #include "symtab.h"
 #include "ompi.h"
 
@@ -88,7 +89,7 @@ aststmt sections_cases(aststmt body, int nsec, aststmt lasts)
 
 	lasts = Case(
 	          numConstant(nsec - 1),
-	          BlockList(BlockList(body->u.omp->body, lasts), Break())
+	          Block3(body->u.omp->body, lasts, Break())
 	        );
 	return (st == NULL ? lasts : BlockList(st, lasts));
 }
@@ -104,10 +105,14 @@ aststmt sections_cases(aststmt body, int nsec, aststmt lasts)
 void xform_sections(aststmt *t)
 {
 	aststmt   s = (*t)->u.omp->body, parent = (*t)->parent, v,
-	          decls, inits = NULL, lasts = NULL, reds = NULL, stmp;
+	          decls, inits = NULL, lasts = NULL, 
+	          reds = NULL, redarrinits = NULL, redfree = NULL, 
+	          stmp, arrsecxvars = NULL;
 	int       nsec;
 	bool      haslast, hasboth, hasred;
 	ompclause nw = xc_ompcon_get_clause((*t)->u.omp, OCNOWAIT);
+	bool      needbarrier = (nw == NULL &&
+	                         xform_implicit_barrier_is_needed((*t)->u.omp));
 	char      clabel[22];
 
 	v = ompdir_commented((*t)->u.omp->directive); /* Put directive in comments */
@@ -122,12 +127,18 @@ void xform_sections(aststmt *t)
 	snprintf(clabel, 22, "CANCEL_sections_%d", (*t)->u.omp->l);
 
 	nsec = count_statments((*t)->u.omp->body->body);   /* Body of the compound */
+	
+	/* get possibly new variables for array section parameters */
+	arrsecxvars = red_arrayexpr_simplify((*t)->u.omp->directive);
+
 	/* Collect all data clause vars - we need to check if any vars
 	 * are both firstprivate and lastprivate
 	 */
 	xc_validate_store_dataclause_vars((*t)->u.omp->directive);
 	/* declarations from the collected vars (not the clauses!) */
 	decls = xc_stored_vars_declarations(&haslast, &hasboth, &hasred);
+	if (arrsecxvars)
+		decls = decls ? Block2(arrsecxvars, decls) : arrsecxvars;
 	/* initialization statments for firstprivate non-scalar vars */
 	if (decls)
 		inits = xc_ompdir_fiparray_initializers((*t)->u.omp->directive);
@@ -139,7 +150,23 @@ void xform_sections(aststmt *t)
 		lasts = xc_ompdir_lastprivate_assignments((*t)->u.omp->directive);
 	/* reduction code */
 	if (hasred)
-		reds = xc_ompdir_reduction_code((*t)->u.omp->directive);
+	{
+		/* Temporary local variables should be kept till the reduction operation
+		 * is fully completed; this is guaranteed if after a barrier, so we must
+		 * turn off any barrier removals.
+		 * TODO: maybe we should re-design reductions...
+		 */
+		if (!oldReduction)
+			needbarrier = true;
+		/* Initializers for array reductions */
+		redarrinits = red_array_initializers_from_ompdir((*t)->u.omp->directive);
+		if (redarrinits)
+			inits = (inits) ? BlockList(inits, redarrinits) : redarrinits;
+		/* Code to do the reductions */
+		reds = red_generate_code_from_ompdir((*t)->u.omp->directive);
+		/* Possible de-allocations to go after the barrier */
+		redfree = red_generate_deallocations_from_ompdir((*t)->u.omp->directive);
+	}
 	/* we need 2 more variables (caseid_ and inpar_) */
 	stmp = parse_blocklist_string("int caseid_ = -1, inpar_;");
 	decls = (decls) ? BlockList(decls, stmp) : stmp;
@@ -169,41 +196,40 @@ void xform_sections(aststmt *t)
 	stmp = Labeled(Symbol(clabel), If(IdentName("inpar_"),
 	                                  Call0_stmt("ort_leaving_sections"), NULL));
 
-	s = BlockList(
+	s = Block3(
 	      verbit("for (;;)"),
-	      BlockList(
-	        Compound(
-	          BlockList(
-	            parse_blocklist_string(
-	              "if (inpar_) { if ((caseid_=ort_get_section()) < 0) break; } "
-	              "       else { if ((++caseid_) >= %d) break; }", nsec
-	            ),
-	            s
-	          )
-	        ),
-	        hasred ?
-	        BlockList(reds, stmp) : stmp
-	      )
+	      Compound(
+	        BlockList(
+	          parse_blocklist_string(
+	            "if (inpar_) { if ((caseid_=ort_get_section()) < 0) break; } "
+	            "       else { if ((++caseid_) >= %d) break; }", nsec
+	          ),
+	          s
+	        )
+	      ),
+	      hasred ? BlockList(reds, stmp) : stmp
 	    );
 
 	if (hasboth)      /* Must make sure all threads have entered */
 		s = BlockList(BarrierCall(), s);
 
-	s = BlockList(
-	      BlockList(
-	        decls,
-	        parse_blocklist_string(
-	          "if ((inpar_ = (omp_in_parallel() && "
-	          "omp_get_num_threads() > 1)) != 0) "
-	          "  ort_entering_sections(%d, %d);", nw ? 1 : 0, nsec)
-	      ),
+	s = Block3(
+	      decls,
+	      parse_blocklist_string(
+	        "if ((inpar_ = (omp_in_parallel() && "
+	        "omp_get_num_threads() > 1)) != 0) "
+	        "  ort_entering_sections(%d, %d);", nw ? 1 : 0, nsec),
 	      s
 	    );
 
 	*t = BlockList(v, s);
-
-	if (nw == NULL)      /* Must output a barrier */
+	if (needbarrier)
 		*t = BlockList(*t, BarrierCall());
+	else
+		if (!nw)   /* We ditched the barrier; but should at least flush */
+			*t = BlockList(*t, Call0_stmt("ort_fence")); 
+	if (redfree)
+		*t = BlockList(*t, redfree);
 
 	*t = Compound(*t);
 	ast_stmt_parent(parent, *t);

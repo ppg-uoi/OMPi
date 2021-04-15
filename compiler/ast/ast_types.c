@@ -17,7 +17,7 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* AST types - utilities regarding types */
@@ -67,11 +67,9 @@ nt_sign speclist_sign(astspec s)
 
 nt_basetype speclist_basetype(astspec s)
 {
-
 	if (speclist_getspec(s, SPEC, SPEC_char) != NULL) return (CHAR);
 	if (speclist_getspec(s, SPEC, SPEC_float) != NULL) return (FLOAT);
 	if (speclist_getspec(s, SPEC, SPEC_double) != NULL) return (DOUBLE);
 	if (speclist_getspec(s, SPEC, SPEC_ubool) != NULL) return (UBOOL);
 	return (INT);
 }
-

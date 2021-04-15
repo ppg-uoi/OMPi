@@ -17,7 +17,7 @@
 #
 #    You should have received a copy of the GNU General Public License
 #    along with OMPi; if not, write to the Free Software
-#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #
 ##   This file must be processed by automake
 -include Makelib.conf
@@ -41,8 +41,10 @@ AM_CFLAGS = @DEBUGFLAG@  -I. -I.. -I$(top_srcdir)/common -DLibDir='"'$(pkglibdir
 COMMON_SRC = $(top_srcdir)/common/str.c
 
 libort_a_SOURCES = othr.c \
-    ../ort.c ../omp.c ../tasks.c ../worksharing.c ../barrier.c ../sysdeps.c \
-    ../stealing.c ../pools.c ../env.c ../target.c ../dataenv.c ../modules.c \
+    ../ort.c ../omp.c ../env.c ../parallel.c ../tasks.c ../worksharing.c \
+    ../thrpriv.c ../barrier.c ../reduction.c ../cancel.c ../sysdeps.c \
+    ../stealing.c ../pools.c ../target.c ../targdenv.c ../modules.c \
+    ../taskspf.c ../places.c ../affinity.c ../hostdev.c ../taskdeps.c \
     ../../rt_common.c $(COMMON_SRC)
 
 EXTRA_DIST = ortconf.$(LIBRARY_NAME) ee.h

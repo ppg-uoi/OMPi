@@ -17,15 +17,24 @@
 
   You should have received a copy of the GNU General Public License
   along with OMPi; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 /* callgraph.c */
 
 #include <assert.h>
 #include "callgraph.h"
-#include "set.h"
 #include "ompi.h"
+
+/* Uncomment the following to activate debugging */
+//#define DBG 
+
+#ifdef DBG
+	#define DBGPRN(s) fprintf s;
+#else
+	#define DBGPRN(s) 
+#endif
+#undef DBG
 
 SET_TYPE_DEFINE(cg_stag, symbol, struct { int visited; symbol *froms; }, 97)
 SET_TYPE_IMPLEMENT(cg_stag)
@@ -36,6 +45,8 @@ SET_TYPE_IMPLEMENT(defuncs_stag)
 set(defuncs_stag) defuncs;  /* The set of defined functions */
 static int nfd;             /* Their number */
 
+SET_TYPE_IMPLEMENT(cgfun)
+
 
 static setelem(cg_stag) cg_add_and_init(symbol new)
 {
@@ -44,10 +55,12 @@ static setelem(cg_stag) cg_add_and_init(symbol new)
 
 	if ((e = set_get(cg, new)) == NULL)
 	{
+		DBGPRN((stderr, "[cg] adding new node %s\n", new->name));
 		e = set_put(cg, new);
 		e->value.visited = 0;
-		e->value.froms = (symbol *) smalloc(nfd * sizeof(symbol));
-		for (i = 0; i < nfd; i++)
+		/* nfd+1 to accomodate for initial (possibly fake) function */
+		e->value.froms = (symbol *) smalloc((nfd+1) * sizeof(symbol));
+		for (i = 0; i <= nfd; i++)
 			e->value.froms[i] = NULL;
 	}
 	return (e);
@@ -59,16 +72,18 @@ void cg_add_edge(symbol from, symbol to)
 	setelem(cg_stag) e = cg_add_and_init(to);
 	int i;
 
-	for (i = 0; i < nfd; i++)
+	for (i = 0; i <= nfd; i++)
 		if (e->value.froms[i] == from)
 			return;
 		else
 			if (e->value.froms[i] == NULL)
 			{
+				DBGPRN((stderr, "[cg] adding new edge %s -> %s\n",from->name,to->name));
 				e->value.froms[i] = from;
 				return;
 			};
-	exit_error(1, "[cg_add_edge]: more functions than expected!\n");
+	exit_error(1, "[cg_add_edge]: more functions than expected (%s -> %s)!\n",
+	              from->name, to->name);
 }
 
 
@@ -86,19 +101,41 @@ static void call_graph_do(aststmt t)
 }
 
 
+static void cg_ident(astexpr t, void *state, int ignore)
+{
+	cgstate_t *s = (cgstate_t *) state;
+	stentry   f = symtab_get(stab, t->u.sym, FUNCNAME);
+	
+	if (f)   /* Pointer to a known function; we assume we call it */
+	{
+		DBGPRN((stderr, "[cg] found funcname identifier (%s)\n", t->u.sym->name));
+		cg_add_edge(s->currfunc, t->u.sym);
+		if (set_get(defuncs, t->u.sym))            /* internal function */
+			if ( !(set_get(cg, t->u.sym)->value.visited) )
+			{
+				DBGPRN((stderr, "[cg]   going into %s\n", t->u.sym->name));
+				symbol curr = s->currfunc;
+				call_graph_do( set_get(defuncs, t->u.sym)->value.def );
+				s->currfunc = curr;
+			};
+	}
+}
+
+
 static void cg_funccall(astexpr t, void *state, int ignore)
 {
-	cgstate_t        *s = (cgstate_t *) state;
-	setelem(cg_stag) e;
+	cgstate_t  *s = (cgstate_t *) state;
 	
 	if (t->left->type != IDENT)
 		s->hasfexpr = 1;  /* impossible function call (expression) */
 	else
 	{
+		DBGPRN((stderr, "[cg] found funccall (%s)\n", t->left->u.sym->name));
 		cg_add_edge(s->currfunc, t->left->u.sym);
 		if (set_get(defuncs, t->left->u.sym))            /* internal function */
 			if ( !(set_get(cg, t->left->u.sym)->value.visited) )
 			{
+				DBGPRN((stderr, "[cg]   going into %s\n", t->left->u.sym->name));
 				symbol curr = s->currfunc;
 				call_graph_do( set_get(defuncs, t->left->u.sym)->value.def );
 				s->currfunc = curr;
@@ -112,12 +149,13 @@ static void cg_funcdef(aststmt t, void *state, int ignore)
 	cgstate_t *s = (cgstate_t *) state;
 	
 	s->currfunc = t->u.declaration.decl->decl->decl->u.id;
+	DBGPRN((stderr, "[cg] found funcdef (%s)\n", s->currfunc->name));
 	cg_add_and_init(s->currfunc)->value.visited = 1;
 }
 
 
 /* Finds all defined functions */
-void build_funcdef_set(aststmt t, set(defuncs_stag) set)
+static void build_funcdef_set(aststmt t, set(defuncs_stag) set)
 {
 	if (!t) return;
 	if (t->type == STATEMENTLIST)
@@ -133,6 +171,27 @@ void build_funcdef_set(aststmt t, set(defuncs_stag) set)
 			e->value.id  = set_size(set) - 1;
 			e->value.def = t;
 		};
+}
+
+
+/**
+ * This one discovers all the functions defined in the given AST.
+ *
+ * Any new injected functions could become known through some
+ * cg_add_injected_func() function (although such functions are not
+ * directly called by any other function).
+ * 
+ * It is better to call this function when the AST has been finalized.
+ * s
+ * 
+ * @param tree The whole program tress
+ */
+void cg_find_defined_funcs(aststmt tree)
+{
+	set_init(defuncs_stag, &defuncs);
+	nfd = 0;
+	build_funcdef_set(tree, defuncs);
+	nfd = set_size(defuncs);
 }
 
 
@@ -179,25 +238,29 @@ cg_t *cgset_to_cgmat()
 }
 
 
-cg_t *call_graph(aststmt wholetree, aststmt t)
+/**
+ * Build the call graph starting from a given statement (if the statement is not
+ * at the translation unit level, we discover the function that encloses it).
+ * TODO: maybe we should have an option to include a function if its named is
+ *       mentioned in an expression, other than funccall (e.g. passed as an
+ *       argument to some function).
+ * @param  wholetree the whole AST
+ * @param  t         the statement to start from
+ * @return A 2D array representing the whole graph (see callgraph.h)
+ */
+cg_t *cg_build_call_graph(aststmt t)
 {
-	aststmt    funcdef = ast_get_enclosing_function(t);
-	cgstate_t  st = { NULL, 0 }; 
+	aststmt   funcdef = ast_get_enclosing_function(t);
+	cgstate_t st = { NULL, 0 }; 
 	
-	/* Get all defined functions first */
-	if (!defuncs)
-	{
-		defuncs = set_new(defuncs_stag);
-		build_funcdef_set(wholetree, defuncs);
-		nfd = set_size(defuncs);
-	}
-
+	if (!defuncs) return NULL;
 	if (funcdef)
 		st.currfunc = funcdef->u.declaration.decl->decl->u.id;
 	set_init(cg_stag, &cg);
 	
-	/* Traverse the AST */
+	/* Traverse the statement */
 	travopts_init_noop(&cgtrops);
+	cgtrops.exprc.ident_c = cg_ident;
 	cgtrops.exprc.funccall_c = cg_funccall;
 	cgtrops.stmtc.funcdef_c = cg_funcdef;
 	cgtrops.starg = &st;
@@ -210,7 +273,57 @@ cg_t *call_graph(aststmt wholetree, aststmt t)
 }
 
 
-void call_graph_debug(cg_t *g)
+/**
+ * Builds the call graph starting from a given statement and from that
+ * it returns a set of all the functions called.
+ * @param  t         the statement to start from
+ * @return A set with the called functions
+ */
+set(cgfun) cg_find_called_funcs(aststmt t)
+{
+	static set(cgfun) funcs = NULL;
+	setelem(cg_stag) e;
+	cgstate_t st = { NULL, 0 }; 
+	symbol startfunc;
+	bool   selfcall = false;       /* Whether this func calls itself */
+	int    i;
+	
+	if (!defuncs) return NULL;
+	
+	/* If t is not a function definition, pretend we start from a fake func */
+	startfunc = (t->type != FUNCDEF) ? Symbol("__fakefunc__") : 
+	                             decl_getidentifier_symbol(t->u.declaration.decl);
+
+	st.currfunc = startfunc;
+	set_init(cg_stag, &cg);
+	cg_add_and_init(startfunc);
+	
+	/* Traverse the statement */
+	travopts_init_noop(&cgtrops);
+	cgtrops.exprc.ident_c = cg_ident;
+	cgtrops.exprc.funccall_c = cg_funccall;
+	cgtrops.stmtc.funcdef_c = cg_funcdef;
+	cgtrops.starg = &st;
+	call_graph_do(t);
+
+	/* Check whether we call ourselves */
+	if (startfunc != Symbol("__fakefunc__"))
+		for (e = cg->first; e; e = e->next)
+			if (e->key == startfunc)
+				for (i = 0; i <= nfd; i++)
+					if (e->value.froms[i] == startfunc)
+						selfcall = true;
+
+	/* Copy the functions, skipping startfunc (unless it recurses) */
+	set_init(cgfun, &funcs);
+	for (e = cg->first; e; e = e->next)
+		if (e->key != startfunc || selfcall)
+			set_put(funcs, e->key);
+	return (funcs);
+}
+
+
+static void call_graph_debug(cg_t *g)
 {
 	int i, j; 
 	
@@ -226,12 +339,33 @@ void call_graph_debug(cg_t *g)
 }
 
 
-void call_graph_test(aststmt tree)
+void cg_defuncs_debug()
+{
+	setelem(defuncs_stag) f;
+	
+	fprintf(stderr, "-- All defined functions:\n");
+	for (f = defuncs->first; f; f = f->next)
+		fprintf(stderr, "\t%s\n", f->key->name);
+	fprintf(stderr, "---\n");
+}
+
+
+/** 
+ * Should be called with the whole AST as its parameter
+ */
+void cg_call_graph_test(aststmt tree)
 {
 	int  i, j; 
 	cg_t *g;
 	
-	g = call_graph(tree, tree);
+	if (!defuncs) /* We assume here that tree = whole AST */
+	{
+		cg_find_defined_funcs(tree);
+		if (!defuncs)
+			return;
+	}
+	
+	g = cg_build_call_graph(tree);
 	if (!g)
 		return;
 	
